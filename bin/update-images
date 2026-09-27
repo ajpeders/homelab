@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Safe image update for both stacks: pull newer images for floating/patch tags,
+# recreate only the containers whose image actually changed, then prune dangling
+# images. Version-PINNED images (e.g. sonarr:4.0.17) are re-pulled but don't
+# change until you bump their tag in the compose file — so this never does a
+# surprise major-version jump. Logs to state/update.log.
+#
+# Usage:  ./bin/update-images            # both stacks
+#         ./bin/update-images services   # one stack
+set -uo pipefail
+
+REPO="${HOMELAB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+LOG="$REPO/state/update.log"
+mkdir -p "$(dirname "$LOG")"
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+log() { echo "[$(ts)] $*" | tee -a "$LOG"; }
+
+update_stack() {
+  local name="$1" dir="$REPO/$1"
+  [[ -d "$dir" ]] || { log "skip $name — no $dir"; return; }
+  log "===== $name: pulling images (pinned tags stay put) ====="
+  # --ignore-buildable skips locally-built images (anything with a build: stanza)
+  # that aren't in a registry. Pull failures for other local images are logged,
+  # not fatal (set -e is intentionally off).
+  ( cd "$dir" && docker compose pull --ignore-buildable ) 2>&1 | tee -a "$LOG"
+  log "===== $name: recreating containers with changed images ====="
+  ( cd "$dir" && docker compose up -d ) 2>&1 | tee -a "$LOG" | grep -iE 'Recreate|Start|Error' || true
+}
+
+log "########## update-images START ##########"
+if [[ $# -gt 0 ]]; then
+  for s in "$@"; do update_stack "$s"; done
+else
+  update_stack services
+  update_stack games
+fi
+
+log "===== pruning dangling (untagged) images ====="
+docker image prune -f 2>&1 | tee -a "$LOG"
+
+log "########## update-images DONE ##########"
+echo "  full log: $LOG"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Stop the Minecraft server when no players are online
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/homelab/bin/mc-idle
+# mc-switch off honors the 5m stop_grace_period, so allow for a slow save.
+TimeoutStartSec=420

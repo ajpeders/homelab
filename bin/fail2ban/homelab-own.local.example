@@ -1,0 +1,5 @@
+# Per-host fail2ban ignore list — copy to /etc/fail2ban/jail.d/homelab-own.local
+# (read after jail.local, so this [DEFAULT] value wins). Your own public
+# addresses: the LAN's global IPv6 /64 and the house's public IPv4.
+[DEFAULT]
+homelab_own_ips = 2001:db8:1234:5678::/64 203.0.113.10

@@ -1,0 +1,36 @@
+# Full RW docker.sock = host root for anyone who gets into the UI. Policy
+# (2026-07-08 review): run on demand only, stop when done —
+#   start: docker compose --profile admin -f services/portainer/docker-compose.yml up -d
+#   stop:  docker stop portainer
+# The admin profile keeps it out of plain `docker compose up -d` (incl. the
+# boot unit), and unless-stopped honors a manual stop across reboots.
+services:
+  portainer:
+    container_name: portainer
+    image: portainer/portainer-ce:2.21.5
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    profiles:
+      - admin
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../../state/portainer:/data
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.portainer.rule=Host(`${PORTAINER_DOMAIN:-portainer.${DOMAIN}}`)
+      - traefik.http.routers.portainer.entrypoints=websecure
+      - traefik.http.routers.portainer.tls=true
+      - traefik.http.routers.portainer.tls.certresolver=letsencrypt
+      - traefik.http.routers.portainer.middlewares=local-only@file
+      - traefik.http.services.portainer.loadbalancer.server.port=9000
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

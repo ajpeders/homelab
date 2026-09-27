@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# vpn-route — teach the host how to reach the WireGuard subnet.
+#
+# Without this, nothing on the host (or on the `web` docker network, which
+# routes via the host) can reach a VPN client. The host's default route sends
+# 10.9.0.0/24 out to the LAN gateway, which knows nothing about it — so every
+# connection to a 10.8.0.x peer fails, while the wireguard container itself
+# reaches them fine. That asymmetry cost a long debugging session on
+# 2026-08-16: a service could not reach Ollama on an off-site machine and it
+# looked like a firewall on the remote box, which was never the problem.
+#
+# The wireguard container already has ip_forward=1 and MASQUERADEs 10.9.0.0/24,
+# so pointing a route at it is all that is needed.
+#
+# The container's IP is looked up at runtime rather than hardcoded: docker
+# reassigns addresses on the `web` network when containers are recreated, and a
+# stale literal would silently blackhole the whole VPN subnet.
+set -uo pipefail
+
+SUBNET="${VPN_SUBNET:-10.9.0.0/24}"
+CONTAINER="${VPN_CONTAINER:-wireguard}"
+NETWORK="${VPN_NETWORK:-web}"
+
+gw="$(docker inspect "$CONTAINER" \
+        -f "{{(index .NetworkSettings.Networks \"$NETWORK\").IPAddress}}" 2>/dev/null)"
+
+if [[ -z "$gw" || "$gw" == "<no value>" ]]; then
+  echo "vpn-route: cannot resolve $CONTAINER's IP on the '$NETWORK' network — is it running?" >&2
+  exit 1
+fi
+
+# `replace` not `add`: idempotent, and it self-heals if the container came back
+# on a different address.
+if ip route replace "$SUBNET" via "$gw"; then
+  echo "vpn-route: $SUBNET via $gw ($CONTAINER)"
+else
+  echo "vpn-route: failed to set route $SUBNET via $gw" >&2
+  exit 1
+fi

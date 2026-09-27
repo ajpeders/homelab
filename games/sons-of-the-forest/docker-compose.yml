@@ -1,0 +1,33 @@
+services:
+  sons-of-the-forest:
+    container_name: sons-of-the-forest
+    security_opt:
+      - no-new-privileges:true
+    # Upstream only publishes :latest / :develop (no version tags), so we pin by
+    # digest to keep the image reproducible.
+    image: jammsen/sons-of-the-forest-dedicated-server@sha256:d419bdf811e67c749917a804ebefa3fb4317045ec877b633295ef68840232be9
+    restart: unless-stopped
+    # Wine teardown + world save can exceed docker's 10s default, which would
+    # SIGKILL the server mid-save.
+    stop_grace_period: 2m
+    mem_limit: 12g
+    memswap_limit: 12g
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      ALWAYS_UPDATE_ON_START: "${ALWAYS_UPDATE_ON_START:-true}"
+      SKIP_NETWORK_ACCESSIBILITY_TEST: "${SKIP_NETWORK_ACCESSIBILITY_TEST:-true}"
+    ports:
+      - "8766:8766/udp"  # Game traffic
+      - "27016:27016/udp"  # Steam authentication
+      - "9700:9700/udp"  # Query port
+    volumes:
+      - ./game:/sonsoftheforest
+    networks:
+      - default
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

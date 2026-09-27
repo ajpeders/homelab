@@ -1,0 +1,12 @@
+name: games
+
+include:
+  - ./sons-of-the-forest/docker-compose.yml
+  - ./palworld/docker-compose.yml
+  - ./minecraft/vanilla/docker-compose.yml
+  - ./minecraft/atm10/docker-compose.yml
+
+networks:
+  web:
+    external: true
+    name: web

@@ -1,0 +1,41 @@
+services:
+  lidarr:
+    container_name: lidarr
+    security_opt:
+      - no-new-privileges:true
+    image: lscr.io/linuxserver/lidarr:3.1.0
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
+    environment:
+      PUID: ${PUID:?set PUID in services/.env}
+      PGID: ${PGID:?set PGID in services/.env}
+      TZ: ${TZ:-UTC}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8686/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ../../state/lidarr:/config
+      - ${LIDARR_MEDIA_PATH:-${SHARE_DIR:?set SHARE_DIR in services/.env}/media}:/data
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.lidarr.rule=Host(`${LIDARR_DOMAIN:-lidarr.${DOMAIN}}`)
+      - traefik.http.routers.lidarr.entrypoints=websecure
+      - traefik.http.routers.lidarr.tls=true
+      - traefik.http.routers.lidarr.tls.certresolver=letsencrypt
+      - traefik.http.routers.lidarr.middlewares=local-only@file
+      - traefik.http.services.lidarr.loadbalancer.server.port=8686
+    networks:
+      web:
+        # Pinned so Prowlarr (in gluetun netns, can't resolve Docker DNS) has a
+        # stable baseUrl that survives container recreate.
+        ipv4_address: 172.28.0.233
+
+networks:
+  web:
+    external: true
+    name: web

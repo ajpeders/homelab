@@ -1,0 +1,63 @@
+# Dendrite (Matrix homeserver) config.
+# Copy to dendrite.yaml and fill in secrets. dendrite.yaml is gitignored
+# because it holds the DB password and shared secrets.
+
+version: 2
+
+global:
+  server_name: chat.example.com
+  private_key: /var/dendrite/matrix_key.pem
+  key_validity_period: 168h0m0s
+  jetstream:
+    storage_path: /var/dendrite/jetstream
+  database:
+    # Password must match POSTGRES_PASSWORD for the matrix-db postgres service.
+    connection_string: postgresql://dendrite:REPLACE_DB_PASSWORD@matrix-db/dendrite?sslmode=disable
+    max_open_conns: 90
+    max_idle_conns: 5
+    conn_max_lifetime: -1
+  cache:
+    max_size_estimated_bytes: 1073741824
+    max_age: 1h
+
+client_api:
+  registration_disabled: true
+  registration_requires_token: true
+  # Generate with: openssl rand -hex 32
+  registration_shared_secret: "REPLACE_REGISTRATION_SHARED_SECRET"
+  guests_disabled: true
+  rate_limiting:
+    enabled: true
+    threshold: 20
+    cooloff_ms: 500
+  turn:
+    turn_user_lifetime: 24h
+    turn_uris:
+      - "turn:chat.example.com:3478?transport=udp"
+      - "turn:chat.example.com:3478?transport=tcp"
+    # MUST match static-auth-secret in coturn.conf.
+    turn_shared_secret: "REPLACE_TURN_SHARED_SECRET"
+
+federation_api:
+  send_max_retries: 16
+  send_timeout: 2m
+  disable_tls_validation: false
+
+media_api:
+  base_path: /var/dendrite/media
+  max_file_size_bytes: 104857600
+  dynamic_thumbnails: false
+  max_thumbnail_generators: 10
+
+sync_api:
+  search:
+    enabled: true
+    index_path: /var/dendrite/searchindex
+    language: en
+
+user_api:
+  bcrypt_cost: 10
+
+logging:
+  - type: std
+    level: warn

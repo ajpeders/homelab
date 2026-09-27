@@ -1,0 +1,39 @@
+services:
+  flaresolverr:
+    container_name: flaresolverr
+    security_opt:
+      - no-new-privileges:true
+    image: flaresolverr/flaresolverr:v3.5.0
+    restart: unless-stopped
+    # Runs a headless Chrome to solve CF challenges — the one *arr-stack service
+    # that can balloon. Cap it so a stuck/leaking browser can't OOM the host.
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      LOG_LEVEL: info
+      TZ: ${TZ:-UTC}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8191/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.flaresolverr.rule=Host(`${FLARESOLVERR_DOMAIN:-flaresolverr.${DOMAIN}}`)
+      - traefik.http.routers.flaresolverr.entrypoints=websecure
+      - traefik.http.routers.flaresolverr.tls=true
+      - traefik.http.routers.flaresolverr.tls.certresolver=letsencrypt
+      - traefik.http.routers.flaresolverr.middlewares=local-only@file
+      - traefik.http.services.flaresolverr.loadbalancer.server.port=8191
+    networks:
+      web:
+        # Pinned so Prowlarr (in gluetun netns, can't resolve Docker DNS) has a
+        # stable host for the FlareSolverr proxy that survives container recreate.
+        ipv4_address: 172.28.0.230
+
+networks:
+  web:
+    external: true
+    name: web

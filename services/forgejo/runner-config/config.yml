@@ -1,0 +1,35 @@
+log:
+  level: info
+
+runner:
+  capacity: 2
+  envs: {}
+  env_file: ""
+  timeout: 3h
+  insecure: false
+  fetch_timeout: 5s
+  fetch_interval: 2s
+
+cache:
+  enabled: true
+  dir: ""
+  host: ""
+  port: 0
+
+container:
+  # Dedicated network (defined in ../docker-compose.yml, fixed subnet
+  # 172.30.0.0/24) so ci-net-guard.service can firewall jobs off the LAN.
+  # forgejo is attached to it, so jobs still resolve forgejo:3000 to clone.
+  network: "ci-jobs"
+  privileged: false
+  # Job containers run under gVisor — userspace kernel (syscall) sandbox.
+  # runsc-hostnet = runsc with --network=host (gVisor's netstack can't reach
+  # Docker's embedded DNS on user-defined networks, which breaks ALL name
+  # resolution in jobs; host-netstack mode keeps the syscall sandbox and
+  # restores DNS). Requires the runtime registered in /etc/docker/daemon.json:
+  #   "runsc-hostnet": {"path": "/usr/local/bin/runsc", "runtimeArgs": ["--network=host"]}
+  options: "--runtime=runsc-hostnet"
+  workdir_parent:
+  valid_volumes: []
+  docker_host: "-"
+  force_pull: false

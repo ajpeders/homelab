@@ -1,0 +1,32 @@
+services:
+  mealie:
+    container_name: mealie
+    security_opt:
+      - no-new-privileges:true
+    image: ghcr.io/mealie-recipes/mealie:v3.19.2
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
+    environment:
+      BASE_URL: https://${MEALIE_DOMAIN:-mealie.${DOMAIN}}
+      DEFAULT_EMAIL: ${MEALIE_ADMIN_EMAIL}
+      DEFAULT_PASSWORD: ${MEALIE_ADMIN_PASSWORD}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ../../state/mealie:/app/data
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.mealie.rule=Host(`${MEALIE_DOMAIN:-mealie.${DOMAIN}}`)
+      - traefik.http.routers.mealie.entrypoints=websecure
+      - traefik.http.routers.mealie.tls=true
+      - traefik.http.routers.mealie.tls.certresolver=letsencrypt
+      - traefik.http.routers.mealie.middlewares=local-only@file
+      - traefik.http.services.mealie.loadbalancer.server.port=9000
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

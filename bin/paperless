@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# paperless — query the paperless-ngx API (document archive) from the host/brain.
+# Auth: PAPERLESS_API_TOKEN from services/paperless/.env.
+# Usage:
+#   bin/paperless search <query>          # top-10 matches as "id<TAB>title"
+#   bin/paperless get <id>                # document metadata (JSON)
+#   bin/paperless download <id> [path]    # fetch the original file
+set -uo pipefail
+REPO="${HOMELAB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+CONF="$REPO/services/paperless/.env"
+[[ -f "$CONF" ]] && { set -a; . "$CONF"; set +a; }
+
+DOMAIN="${DOMAIN:-$(sed -n 's/^DOMAIN=//p' "$REPO/services/.env" 2>/dev/null | tail -1)}"
+BASE="https://${PAPERLESS_DOMAIN:-paperless.$DOMAIN}"
+TOKEN="${PAPERLESS_API_TOKEN:-}"
+
+[[ -n "$TOKEN" ]] || { echo "paperless: PAPERLESS_API_TOKEN not set in $CONF" >&2; exit 1; }
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  search)
+    curl -fsS -G --max-time 30 -H "Authorization: Token $TOKEN" \
+      "$BASE/api/documents/" --data-urlencode "query=${1:-}" \
+      --data-urlencode "limit=10" \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); [print(r["id"], r["title"], sep="\t") for r in d.get("results",[])]'
+    ;;
+  get)
+    curl -fsS --max-time 30 -H "Authorization: Token $TOKEN" "$BASE/api/documents/$1/" | python3 -m json.tool
+    ;;
+  download)
+    out="${2:-/tmp/paperless-$1.pdf}"
+    curl -fsS --max-time 60 -H "Authorization: Token $TOKEN" "$BASE/api/documents/$1/download/" -o "$out"
+    echo "saved: $out"
+    ;;
+  *)
+    echo "usage: paperless search <query> | get <id> | download <id> [path]" >&2
+    exit 2
+    ;;
+esac

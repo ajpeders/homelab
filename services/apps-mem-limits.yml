@@ -1,0 +1,9 @@
+# Memory limits for services whose compose lives outside this repo (apps/).
+# Chain it last via COMPOSE_FILE in services/.env so entries here win.
+# Key on the compose SERVICE name, not container_name, and always pair
+# mem_limit with an equal memswap_limit (otherwise Docker allows 2x via swap).
+#
+#   myapp:
+#     mem_limit: 512m
+#     memswap_limit: 512m
+services: {}

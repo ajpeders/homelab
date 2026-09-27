@@ -1,0 +1,30 @@
+.env
+# Secret-bearing env variants + editor/backup copies — never commit these.
+.env.*
+!.env.example
+*.bak*
+*_bk
+*~
+state/
+backups/
+
+# Local agent/tooling artifacts
+.codex
+**/.codex
+.claude/
+
+# Checked-in service-specific config exclusions
+services/samba/config.yml
+services/searxng/settings.yml
+services/matrix/dendrite.yaml
+services/matrix/coturn.conf
+services/matrix/livekit.yaml
+
+apps/
+
+
+# Python bytecode from bin/tests
+__pycache__/
+
+# Agent instructions — kept on disk, backed up by bin/backup (docs leg), not tracked.
+CLAUDE.md

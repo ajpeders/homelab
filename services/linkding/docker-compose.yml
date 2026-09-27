@@ -1,0 +1,30 @@
+services:
+  linkding:
+    container_name: linkding
+    security_opt:
+      - no-new-privileges:true
+    image: sissbruecker/linkding:1.45.0
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    environment:
+      LD_SUPERUSER_NAME: ${LINKDING_ADMIN_USER:-admin}
+      LD_SUPERUSER_PASSWORD: ${LINKDING_ADMIN_PASSWORD}
+    volumes:
+      - ../../state/linkding:/etc/linkding/data
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.linkding.rule=Host(`${LINKDING_DOMAIN:-links.${DOMAIN}}`)
+      - traefik.http.routers.linkding.entrypoints=websecure
+      - traefik.http.routers.linkding.tls=true
+      - traefik.http.routers.linkding.tls.certresolver=letsencrypt
+      - traefik.http.routers.linkding.middlewares=local-only@file
+      - traefik.http.services.linkding.loadbalancer.server.port=9090
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

@@ -1,0 +1,13 @@
+# LiveKit SFU config for Element Call.
+# Copy to livekit.yaml and fill in the API key/secret. livekit.yaml is
+# gitignored because it holds the key secret.
+port: 7880
+rtc:
+  tcp_port: 7881
+  udp_port: 7881
+  use_external_ip: true
+keys:
+  # Format is  <API_KEY>: <API_SECRET>
+  # The API key must match LIVEKIT_KEY used by the lk-jwt service.
+  # Generate with: docker run --rm livekit/livekit-server generate-keys
+  REPLACE_API_KEY: REPLACE_API_SECRET

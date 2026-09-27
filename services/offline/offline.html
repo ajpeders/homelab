@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Service offline</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex; align-items: center; justify-content: center;
+      background: #0e1116; color: #e6edf3;
+      font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      text-align: center; padding: 2rem;
+    }
+    .card { max-width: 30rem; }
+    .dot { width: 12px; height: 12px; border-radius: 50%; background: #f0883e;
+      display: inline-block; margin-right: .5rem; vertical-align: middle;
+      box-shadow: 0 0 0 4px rgba(240,136,62,.15); }
+    h1 { font-size: 1.5rem; margin: .5rem 0; font-weight: 600; }
+    p { color: #9aa5b1; margin: .5rem 0; }
+    code { background: #1b2028; padding: .1rem .4rem; border-radius: 4px; color: #e6edf3; }
+    a { color: #58a6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .foot { margin-top: 1.5rem; font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <p><span class="dot"></span>Service unavailable</p>
+    <h1>This service is offline</h1>
+    <p>The service for this address exists but its container isn't running or
+       hasn't finished starting yet. This isn't a wrong URL — the routing is fine.</p>
+    <p>Try again in a moment, or check the stack with
+       <code>docker ps</code>.</p>
+  </div>
+</body>
+</html>

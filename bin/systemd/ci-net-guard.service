@@ -1,0 +1,29 @@
+# Firewall for CI job containers — boot unit.
+# Install: sudo cp bin/systemd/ci-net-guard.service /etc/systemd/system/ \
+#          && sudo systemctl daemon-reload && sudo systemctl enable --now ci-net-guard
+#
+# CI job containers run on the fixed-subnet `ci-jobs` docker network
+# (172.30.0.0/24, defined in services/forgejo/docker-compose.yml). This unit
+# blocks that subnet from reaching the LAN or any other private range while
+# leaving internet egress (package installs, etc.) and same-subnet traffic
+# (cloning from forgejo:3000) working. Idempotent: safe to re-run.
+[Unit]
+Description=Block CI job containers (ci-jobs subnet) from private networks
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '\
+  iptables -N HOMELAB-CI 2>/dev/null; iptables -F HOMELAB-CI; \
+  iptables -A HOMELAB-CI -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN; \
+  iptables -A HOMELAB-CI -d 172.30.0.0/24 -j RETURN; \
+  iptables -A HOMELAB-CI -d 10.0.0.0/8 -j DROP; \
+  iptables -A HOMELAB-CI -d 172.16.0.0/12 -j DROP; \
+  iptables -A HOMELAB-CI -d 192.168.1.0/16 -j DROP; \
+  iptables -C DOCKER-USER -s 172.30.0.0/24 -j HOMELAB-CI 2>/dev/null || \
+    iptables -I DOCKER-USER -s 172.30.0.0/24 -j HOMELAB-CI'
+
+[Install]
+WantedBy=multi-user.target

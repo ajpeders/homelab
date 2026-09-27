@@ -1,0 +1,119 @@
+# Least-privilege Docker control path for host-side (non-container) automation.
+#
+# For a host-side (non-container) caller that can't join a private Docker
+# network: the proxy publishes to 127.0.0.1 ONLY and the caller sets
+# `DOCKER_HOST=tcp://127.0.0.1:2375`.
+#
+# ---------------------------------------------------------------------------
+# SOFT BOUNDARY — a caller whose user is in the `docker` group can still reach
+# /var/run/docker.sock directly and bypass this proxy. It is a GUARDRAIL that
+# makes least-privilege the default path, not a hard boundary.
+#
+# ---------------------------------------------------------------------------
+#
+# Flag semantics verified against upstream README + haproxy.cfg
+# (tecnativa/docker-socket-proxy, release v0.5.0):
+#   * every request is DENIED by default — `dockerfrontend` ends with a bare
+#     `http-request deny`, so any API family with no matching allow-rule
+#     returns 403 Forbidden;
+#   * `POST=0` would restrict the whole API to GET/HEAD (read-only) via
+#     `deny unless METH_GET || { env(POST) -m bool }`, so POST must be 1 for
+#     start/stop/restart/kill, which are POSTs;
+#   * the `/containers` allow-rule is a PREFIX match and is evaluated BEFORE
+#     the `/exec` rule, so EXEC=0 does NOT block creation of an exec instance
+#     (`POST /containers/{id}/exec`). What actually blocks `docker exec` is the
+#     CLI's second call, `POST /exec/{id}/start`, which no allow-rule matches
+#     once EXEC=0 — that 403s and the client fails;
+#   * the proxy cannot express "lifecycle writes only". CONTAINERS=1 + POST=1
+#     is all-or-nothing for that family, so it also permits /containers/create,
+#     DELETE /containers/{id}, and the archive/attach/export endpoints
+#     (`docker cp`, `docker attach`). Escalation is still blocked because
+#     COMMIT=0 + IMAGES=0 + no /exec means there is no commit→run path.
+#     Destructive-verb confirmation is delegated to bin/audit-docker.sh.
+services:
+  docker-socket-proxy:
+    container_name: docker-socket-proxy
+    # No version tag is published on Docker Hub for this project (only
+    # `latest`, `master`, and stale 0.x tags). Upstream `latest` == release
+    # v0.5.0 (pushed 2026-07-27). Index digest, for pinning if you want it:
+    #   sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    # Upstream's README suggests --privileged for SELinux/AppArmor hosts (the
+    # socket bind mount gets locked down there). This host runs neither
+    # enforcing, and the container runs as root (upstream `USER root`), so it
+    # needs no capabilities at all: HAProxy binds 2375 (>1024, no
+    # CAP_NET_BIND_SERVICE) and talks to a unix socket (no capability).
+    # Deliberately NOT privileged.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      # Read-only bind mount as required. NB a unix socket is used via
+      # connect(), which the :ro flag does not police — the real least
+      # privilege here is the env-flag allowlist below, not this flag.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      # Loopback ONLY. Never 0.0.0.0, no Traefik labels, no `web` network, so
+      # there is no route to this from the LAN, the tailnet, or any other
+      # container on the homelab networks.
+      - "127.0.0.1:2375:2375"
+    environment:
+      # --- The entire granted surface: read + container lifecycle ---
+      CONTAINERS: "1"       # /containers/*  -> ps, inspect, logs, stats, top (+ create/rm: see header)
+      POST: "1"             # required for any write; without it the API is read-only
+      ALLOW_START: "1"      # POST /containers/{id}/start
+      ALLOW_STOP: "1"       # POST /containers/{id}/stop
+      ALLOW_RESTARTS: "1"   # POST /containers/{id}/restart|kill
+
+      # --- Container-adjacent verbs, explicitly revoked ---
+      ALLOW_PAUSE: "0"
+      ALLOW_UNPAUSE: "0"
+
+      # --- Everything else revoked. Upstream already defaults most of these to
+      #     0; they are stated explicitly so THIS file is the policy, and so a
+      #     future upstream default flip cannot silently widen it. ---
+      AUTH: "0"             # /auth/*        registry credentials
+      BUILD: "0"            # /build         image builds
+      COMMIT: "0"           # /commit        container->image (the escape hatch)
+      CONFIGS: "0"          # /configs       swarm configs
+      DISTRIBUTION: "0"     # /distribution  image manifests
+      EXEC: "0"             # /exec/*        gates the second half of `docker exec`
+      GRPC: "0"             # /grpc
+      IMAGES: "0"           # /images/*      list/pull/push/tag -> `docker run` of a new image fails
+      INFO: "0"             # /info
+      NETWORKS: "0"         # /networks/*
+      NODES: "0"            # /nodes/*
+      PLUGINS: "0"          # /plugins/*
+      SECRETS: "0"          # /secrets/*
+      SERVICES: "0"         # /services/*    swarm services
+      SESSION: "0"          # /session/*
+      SWARM: "0"            # /swarm/*
+      SYSTEM: "0"           # /system/*      df, events-stream, prune
+      TASKS: "0"            # /tasks/*
+      VOLUMES: "0"          # /volumes/*
+
+      # --- Ambient / negotiation sections ---
+      PING: "1"             # /_ping   first thing the docker CLI hits
+      VERSION: "1"          # /version API version negotiation
+      EVENTS: "0"           # /events  upstream defaults this ON; not needed for the granted ops
+      LOG_LEVEL: "info"     # keep 403s in the log -> the proxy doubles as an audit trail
+    networks:
+      # A dedicated network so this is reachable from nothing else. NOT `web`
+      # (no Traefik, no LAN) and deliberately not the shared project default
+      # network either, which most homelab services sit on.
+      #
+      # Note: `internal: true` is NOT used here even though it would also cut
+      # egress. Verified on homelab (Docker 29.7.2): a published port on an
+      # `internal: true` network does not answer on the host loopback
+      # (control test on a normal network returned HTTP 200, the internal one
+      # returned HTTP 000). Loopback reachability is a hard requirement, so
+      # this stays a plain bridge. The proxy has exactly one backend
+      # (the unix socket), so there is no egress path in practice.
+      - docker-socket-proxy
+
+networks:
+  docker-socket-proxy:

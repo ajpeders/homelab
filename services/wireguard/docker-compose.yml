@@ -1,0 +1,79 @@
+services:
+  wireguard:
+    container_name: wireguard
+    security_opt:
+      - no-new-privileges:true
+    image: ghcr.io/wg-easy/wg-easy:15.3.0
+    restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
+    environment:
+      - INSECURE=false
+      - INIT_ENABLED=true
+      - INIT_USERNAME=admin
+      - INIT_PASSWORD=${WG_INIT_PASSWORD}
+      - INIT_HOST=${WG_HOST}
+      - INIT_PORT=51820
+      - INIT_DNS=172.28.0.53
+      - INIT_IPV4_CIDR=10.9.0.0/24
+      # Split-tunnel: only home networks route through the VPN, so general
+      # browsing stays on the client's own connection (not capped by home
+      # upload). Adblock still works everywhere because clients' DNS points at
+      # AdGuard (172.28.0.53, inside the tunnel) — DNS filtering happens, the
+      # page bytes come direct. Full-tunnel was 0.0.0.0/0,::/0; switch back if
+      # you want IP-masking/privacy for all client traffic.
+      #   LAN_SUBNET = home LAN, 172.28.0.0/16 = docker/Traefik, 10.9.0.0/24 = VPN subnet
+      - INIT_ALLOWED_IPS=${LAN_SUBNET:?set LAN_SUBNET in services/.env},172.28.0.0/16,10.9.0.0/24
+    volumes:
+      - ../../state/wireguard:/etc/wireguard
+    ports:
+      - "51820:51820/udp"
+    # NET_ADMIN only — needed to create/configure the wg0 interface. SYS_MODULE
+    # (+ the /lib/modules mount) was dropped 2026-07-08: the host loads the
+    # wireguard module at boot via /etc/modules-load.d/wireguard.conf
+    # (source: bin/modules-load.d/wireguard.conf), so the container never
+    # modprobes. SYS_MODULE = load arbitrary kernel modules = host takeover, so
+    # it's the one cap worth eliminating.
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.wireguard.rule=Host(`${WG_DOMAIN:-vpn.${DOMAIN}}`)
+      - traefik.http.routers.wireguard.entrypoints=websecure
+      - traefik.http.routers.wireguard.tls=true
+      - traefik.http.routers.wireguard.tls.certresolver=letsencrypt
+      - traefik.http.routers.wireguard.middlewares=local-only@file
+      - traefik.http.services.wireguard.loadbalancer.server.port=51821
+    networks:
+      - web
+
+  wg-config-dump:
+    container_name: wg-config-dump
+    security_opt:
+      - no-new-privileges:true
+    # One-shot (no restart policy), bounded anyway so "every service carries a
+    # limit" is literally true and stays checkable.
+    mem_limit: 128m
+    memswap_limit: 128m
+    image: alpine:3.21
+    depends_on:
+      wireguard:
+        condition: service_healthy
+    environment:
+      - WG_HOSTNAME=${WG_HOST}
+      - WG_PUBLIC_IP=${WG_PUBLIC_IP:-}
+    volumes:
+      - ../../state/wireguard:/wg:ro
+      - ${WG_CONFIG_DUMP_PATH:-${SHARE_DIR:?set SHARE_DIR in services/.env}/vpn}:/out
+      - ./dump-configs.sh:/dump-configs.sh:ro
+    entrypoint: ["/bin/sh", "/dump-configs.sh"]
+    restart: "no"
+
+networks:
+  web:
+    external: true
+    name: web

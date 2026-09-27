@@ -1,0 +1,70 @@
+# nginx image template: envsubst renders this into conf.d/default.conf at
+# start, substituting ONLY variables defined in the container env (so nginx's
+# own $uri etc. are left alone). Hosts come from MATRIX_DOMAIN / LKJWT_DOMAIN.
+server {
+  listen 80;
+  listen [::]:80;
+
+  root /usr/share/nginx/html;
+
+  location /.well-known/matrix/client {
+    default_type application/json;
+    add_header Access-Control-Allow-Origin *;
+    return 200 '{"m.homeserver":{"base_url":"https://${CINNY_MATRIX_HOST}"},"org.matrix.msc4143.rtc_foci":[{"type":"livekit","livekit_service_url":"https://${CINNY_LKJWT_HOST}"}]}';
+  }
+
+  location /.well-known/matrix/server {
+    default_type application/json;
+    add_header Access-Control-Allow-Origin *;
+    return 200 '{"m.server":"${CINNY_MATRIX_HOST}:443"}';
+  }
+
+  # Vite emits content-hashed files into these directories. Their URLs change
+  # whenever their contents change, so browsers can safely retain them.
+  location ^~ /assets/ {
+    try_files $uri =404;
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+  }
+
+  location ^~ /public/element-call/assets/ {
+    try_files $uri =404;
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+  }
+
+  # These stable URLs can change between deployments and must be revalidated.
+  location = /config.json {
+    default_type application/json;
+    add_header Cache-Control "no-store" always;
+    return 200 '{"defaultHomeserver":0,"homeserverList":["${CINNY_MATRIX_HOST}"],"allowCustomHomeservers":false}';
+  }
+
+  location = /manifest.json {
+    add_header Cache-Control "no-cache" always;
+  }
+
+  location = /sw.js {
+    add_header Cache-Control "no-cache" always;
+  }
+
+  location = /public/element-call/config.json {
+    default_type application/json;
+    add_header Cache-Control "no-store" always;
+    return 200 '{"livekit_service_url":"https://${CINNY_LKJWT_HOST}","matrix_rtc_session":{"delayed_leave_event_delay_ms":90000,"delayed_leave_event_restart_local_timeout_ms":10000,"delayed_leave_event_restart_ms":4000,"membership_event_expiry_ms":7200000,"network_error_retry_ms":100,"wait_for_key_rotation_ms":5000}}';
+  }
+
+  location = /public/element-call/index.html {
+    add_header Cache-Control "no-cache" always;
+  }
+
+  location / {
+    rewrite ^/config.json$ /config.json break;
+    rewrite ^/manifest.json$ /manifest.json break;
+    rewrite ^/sw.js$ /sw.js break;
+    rewrite ^/pdf.worker.min.js$ /pdf.worker.min.js break;
+    rewrite ^/public/(.*)$ /public/$1 break;
+    rewrite ^/assets/(.*)$ /assets/$1 break;
+
+    rewrite ^(.+)$ /index.html break;
+    add_header Cache-Control "no-cache" always;
+  }
+}

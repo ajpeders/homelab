@@ -1,0 +1,27 @@
+services:
+  qbittorrent:
+    container_name: qbittorrent
+    security_opt:
+      - no-new-privileges:true
+    image: lscr.io/linuxserver/qbittorrent:5.2.2
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    network_mode: "service:gluetun"
+    environment:
+      PUID: ${PUID:?set PUID in services/.env}
+      PGID: ${PGID:?set PGID in services/.env}
+      TZ: ${TZ:-UTC}
+      WEBUI_PORT: 8080
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ../../state/qbittorrent:/config
+      - ${QBITTORRENT_DOWNLOADS_PATH:-${SHARE_DIR:?set SHARE_DIR in services/.env}/media/downloads}:/downloads

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Usage: wg-config <client-name>
+# Dumps a wg-quick config for the named wg-easy client to stdout.
+set -euo pipefail
+
+client="${1:-}"
+if [[ -z "$client" ]]; then
+  echo "Usage: $0 <client-name>" >&2
+  echo "Available clients:" >&2
+  docker exec wireguard sqlite3 /etc/wireguard/wg-easy.db \
+    "SELECT name || ' (' || ipv4_address || ')' FROM clients_table WHERE enabled=1;" >&2
+  exit 1
+fi
+
+row=$(docker exec wireguard sqlite3 -separator '|' /etc/wireguard/wg-easy.db \
+  "SELECT c.private_key, c.ipv4_address, c.ipv6_address, COALESCE(c.dns,''), c.mtu,
+          i.public_key, c.pre_shared_key, COALESCE(c.allowed_ips,''),
+          COALESCE(c.server_endpoint,''), i.port, c.persistent_keepalive
+   FROM clients_table c JOIN interfaces_table i ON c.interface_id = i.name
+   WHERE c.name = '${client}' AND c.enabled = 1;")
+
+if [[ -z "$row" ]]; then
+  echo "No enabled client named '${client}'" >&2
+  exit 1
+fi
+
+IFS='|' read -r priv v4 v6 dns mtu srv_pub psk allowed endpoint port keepalive <<<"$row"
+
+json_to_csv() { python3 -c "import sys,json; print(', '.join(json.loads(sys.argv[1] or '[]')))" "$1"; }
+
+dns_csv=$(json_to_csv "$dns")
+allowed_csv=$(json_to_csv "$allowed")
+
+# Apply fallbacks for fields wg-easy leaves blank
+[[ -z "$allowed_csv" ]] && allowed_csv="0.0.0.0/0, ::/0"
+[[ -z "$endpoint" ]] && endpoint=$(grep WG_HOST "$(dirname "$0")/../services/wireguard/.env" | cut -d= -f2)
+[[ "$keepalive" == "0" || -z "$keepalive" ]] && keepalive=25
+
+cat <<EOF
+[Interface]
+PrivateKey = ${priv}
+Address = ${v4}/24, ${v6}/64
+DNS = ${dns_csv}
+MTU = ${mtu}
+
+[Peer]
+PublicKey = ${srv_pub}
+PresharedKey = ${psk}
+AllowedIPs = ${allowed_csv}
+Endpoint = ${endpoint}:${port}
+PersistentKeepalive = ${keepalive}
+EOF

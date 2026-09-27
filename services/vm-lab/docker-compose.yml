@@ -1,0 +1,121 @@
+services:
+  # Linux sandbox VM — boots a fresh Debian install (auto-downloads the ISO on
+  # first start into state/). Web-based console (noVNC) behind Traefik.
+  vm-debian:
+    container_name: vm-debian
+    security_opt:
+      - no-new-privileges:true
+    image: qemux/qemu:7.34  # pinned to newest stable tag (was untagged/latest)
+    restart: unless-stopped
+    mem_limit: 4g
+    memswap_limit: 4g
+    # VMs are heavyweight (host RAM is tight) — excluded from the default
+    # `docker compose up -d`. Start explicitly with:
+    #   docker compose --profile vms up -d
+    profiles: [vms]
+    environment:
+      BOOT: "debian"
+      RAM_SIZE: ${VM_DEBIAN_RAM:-3G}
+      CPU_CORES: ${VM_DEBIAN_CORES:-2}
+      DISK_SIZE: ${VM_DEBIAN_DISK:-32G}
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    # Give the guest OS time to shut down cleanly instead of being SIGKILLed.
+    stop_grace_period: 2m
+    volumes:
+      - ../../state/vm-lab/debian:/storage
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.vm-debian.rule=Host(`${VM_DEBIAN_DOMAIN:-vm-debian.${DOMAIN}}`)
+      - traefik.http.routers.vm-debian.entrypoints=websecure
+      - traefik.http.routers.vm-debian.tls=true
+      - traefik.http.routers.vm-debian.tls.certresolver=letsencrypt
+      - traefik.http.routers.vm-debian.middlewares=local-only@file
+      - traefik.http.services.vm-debian.loadbalancer.server.port=8006
+    networks:
+      - web
+
+  # Windows VM — auto-downloads the Windows ISO and runs the full unattended
+  # install on first start (takes a while). Same web viewer on 8006; once
+  # installed, RDP is also available inside the container on 3389 if we ever
+  # want to expose it.
+  vm-windows:
+    container_name: vm-windows
+    security_opt:
+      - no-new-privileges:true
+    image: dockurr/windows:5.16  # pinned to newest stable tag (was untagged/latest)
+    restart: unless-stopped
+    mem_limit: 5g
+    memswap_limit: 5g
+    profiles: [vms]
+    environment:
+      VERSION: ${VM_WINDOWS_VERSION:-11}
+      RAM_SIZE: ${VM_WINDOWS_RAM:-4G}
+      CPU_CORES: ${VM_WINDOWS_CORES:-4}
+      DISK_SIZE: ${VM_WINDOWS_DISK:-64G}
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    stop_grace_period: 2m
+    volumes:
+      - ../../state/vm-lab/windows:/storage
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.vm-windows.rule=Host(`${VM_WINDOWS_DOMAIN:-vm-windows.${DOMAIN}}`)
+      - traefik.http.routers.vm-windows.entrypoints=websecure
+      - traefik.http.routers.vm-windows.tls=true
+      - traefik.http.routers.vm-windows.tls.certresolver=letsencrypt
+      - traefik.http.routers.vm-windows.middlewares=local-only@file
+      - traefik.http.services.vm-windows.loadbalancer.server.port=8006
+    networks:
+      - web
+
+  # macOS VM — OSX-KVM under the hood. NOTE: Apple's EULA only licenses macOS
+  # on Apple hardware; Apple-ID services (iMessage/App Store) are unreliable in
+  # a VM. Sandbox/testing use only. First boot downloads the installer and you
+  # walk through Disk Utility + install via the web console.
+  vm-macos:
+    container_name: vm-macos
+    security_opt:
+      - no-new-privileges:true
+    image: dockurr/macos:3.00  # pinned to newest stable tag (was untagged/latest)
+    restart: unless-stopped
+    mem_limit: 5g
+    memswap_limit: 5g
+    profiles: [vms]
+    environment:
+      VERSION: ${VM_MACOS_VERSION:-15}
+      RAM_SIZE: ${VM_MACOS_RAM:-4G}
+      CPU_CORES: ${VM_MACOS_CORES:-4}
+      DISK_SIZE: ${VM_MACOS_DISK:-64G}
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    stop_grace_period: 2m
+    volumes:
+      - ../../state/vm-lab/macos:/storage
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.vm-macos.rule=Host(`${VM_MACOS_DOMAIN:-vm-macos.${DOMAIN}}`)
+      - traefik.http.routers.vm-macos.entrypoints=websecure
+      - traefik.http.routers.vm-macos.tls=true
+      - traefik.http.routers.vm-macos.tls.certresolver=letsencrypt
+      - traefik.http.routers.vm-macos.middlewares=local-only@file
+      - traefik.http.services.vm-macos.loadbalancer.server.port=8006
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

@@ -1,0 +1,167 @@
+services:
+  matrix-db:
+    container_name: matrix-db
+    security_opt:
+      - no-new-privileges:true
+    image: postgres:16.14-alpine
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    environment:
+      POSTGRES_USER: dendrite
+      POSTGRES_PASSWORD: ${MATRIX_DB_PASSWORD}
+      POSTGRES_DATABASE: dendrite
+      POSTGRES_INITDB_ARGS: --lc-collate C --lc-ctype C --encoding UTF8
+    volumes:
+      - ../../state/matrix/db:/var/lib/postgresql/data
+    networks:
+      - matrix-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dendrite"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  dendrite:
+    container_name: dendrite
+    security_opt:
+      - no-new-privileges:true
+    image: ghcr.io/element-hq/dendrite-monolith@sha256:7dafe6edfc8cfab758a68a4cf20414df1ade4a36b45b1852554d81fb70b1272c
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
+    depends_on:
+      matrix-db:
+        condition: service_healthy
+    volumes:
+      - ./dendrite.yaml:/etc/dendrite/dendrite.yaml:ro
+      - ../../state/matrix/dendrite:/var/dendrite
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--tries=1", "--spider", "http://localhost:8008/_dendrite/monitor/up"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - matrix-internal
+      - web
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.dendrite.rule=Host(`${MATRIX_DOMAIN:-chat.${DOMAIN}}`) && PathPrefix(`/_matrix`)
+      - traefik.http.routers.dendrite.entrypoints=websecure
+      - traefik.http.routers.dendrite.tls=true
+      - traefik.http.routers.dendrite.tls.certresolver=letsencrypt
+      - traefik.http.routers.dendrite.priority=10
+      - traefik.http.services.dendrite.loadbalancer.server.port=8008
+
+  cinny:
+    container_name: matrix
+    security_opt:
+      - no-new-privileges:true
+    image: ghcr.io/cinnyapp/cinny:v4.12.2
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    environment:
+      # Rendered into the nginx template (well-known + both client configs).
+      CINNY_MATRIX_HOST: ${MATRIX_DOMAIN:-chat.${DOMAIN}}
+      CINNY_LKJWT_HOST: ${LKJWT_DOMAIN:-lk-jwt.${DOMAIN}}
+    volumes:
+      - ./cinny-nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - web
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.cinny.rule=Host(`${MATRIX_DOMAIN:-chat.${DOMAIN}}`)
+      - traefik.http.routers.cinny.entrypoints=websecure
+      - traefik.http.routers.cinny.tls=true
+      - traefik.http.routers.cinny.tls.certresolver=letsencrypt
+      # 3, not 2: the file-provider offline fallback (dynamic.yml) is priority 2
+      # and Traefik tie-breaks equal priorities unpredictably — a tie sent every
+      # chat.<DOMAIN> request to it (403 for WAN via local-only, 503 for
+      # LAN) after a provider reload flipped the order (2026-09-12).
+      - traefik.http.routers.cinny.priority=3
+      - traefik.http.services.cinny.loadbalancer.server.port=80
+
+  coturn:
+    container_name: coturn
+    security_opt:
+      - no-new-privileges:true
+    image: coturn/coturn:4.13.1-r0
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    network_mode: host
+    volumes:
+      - ./coturn.conf:/etc/coturn/turnserver.conf:ro
+
+  livekit:
+    container_name: livekit
+    security_opt:
+      - no-new-privileges:true
+    image: livekit/livekit-server:v1.13.1
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
+    command: --config /etc/livekit/livekit.yaml
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7880/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
+    ports:
+      - "7881:7881/tcp"
+      - "7881:7881/udp"
+    networks:
+      - web
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.livekit.rule=Host(`${LIVEKIT_DOMAIN:-livekit.${DOMAIN}}`)
+      - traefik.http.routers.livekit.entrypoints=websecure
+      - traefik.http.routers.livekit.tls=true
+      - traefik.http.routers.livekit.tls.certresolver=letsencrypt
+      - traefik.http.services.livekit.loadbalancer.server.port=7880
+
+  lk-jwt:
+    container_name: lk-jwt
+    security_opt:
+      - no-new-privileges:true
+    image: ghcr.io/element-hq/lk-jwt-service:0.5.0
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    environment:
+      - LIVEKIT_URL=wss://${LIVEKIT_DOMAIN:-livekit.${DOMAIN}}
+      - LIVEKIT_KEY=${LIVEKIT_KEY}
+      - LIVEKIT_SECRET=${LIVEKIT_SECRET}
+      # Restrict full SFU access to our own homeserver's users. Without this,
+      # 0.4.x defaulted to wildcard (*), granting any federated user full access.
+      - LIVEKIT_FULL_ACCESS_HOMESERVERS=${MATRIX_SERVER_NAME:-chat.${DOMAIN}}
+    networks:
+      - web
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.lk-jwt.rule=Host(`${LKJWT_DOMAIN:-lk-jwt.${DOMAIN}}`)
+      - traefik.http.routers.lk-jwt.entrypoints=websecure
+      - traefik.http.routers.lk-jwt.tls=true
+      - traefik.http.routers.lk-jwt.tls.certresolver=letsencrypt
+      - traefik.http.services.lk-jwt.loadbalancer.server.port=8080
+
+networks:
+  web:
+    external: true
+    name: web
+  matrix-internal:
+    name: matrix-internal

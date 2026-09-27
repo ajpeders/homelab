@@ -1,0 +1,18 @@
+[Unit]
+Description=Route the WireGuard subnet via the wireguard container
+# Must run after docker AND after the container actually exists, hence the
+# retry below rather than a plain After= on docker.service.
+After=docker.service network-online.target
+Wants=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+# The container may not be up the instant docker is, so retry briefly instead
+# of failing the boot and leaving the VPN subnet unreachable until someone
+# notices.
+ExecStart=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do /opt/homelab/bin/vpn-route && exit 0; sleep 6; done; exit 1'
+
+[Install]
+WantedBy=multi-user.target

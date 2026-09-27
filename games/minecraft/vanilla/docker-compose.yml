@@ -1,0 +1,89 @@
+services:
+  minecraft:
+    container_name: plan-minecraft
+    security_opt:
+      - no-new-privileges:true
+    image: itzg/minecraft-server:2026.6.0-java21
+    restart: unless-stopped
+    mem_limit: 16g
+    memswap_limit: 16g
+    # Matches atm10. Docker's default is 10s, which SIGKILLs the JVM mid-save on
+    # a 25G world — the container ran with that default until 2026-09-18 because
+    # it belonged to a foreign compose project and this file never applied to it.
+    stop_grace_period: 5m
+    tty: true
+    stdin_open: true
+    expose:
+      - "25565"
+      - "8804"  # Plan web UI
+    environment:
+      EULA: "TRUE"
+      TYPE: "FABRIC"
+      VERSION: 1.21.11
+      MODPACK: "/modpacks/${MODPACK}"
+      MOTD: "${MOTD}"
+      ICON: "${ICON}"
+      LEVEL: "${LEVEL}"
+      MEMORY: "${MEMORY}"
+      DIFFICULTY: "${DIFFICULTY}"
+    healthcheck:
+      test: ["CMD", "mc-health"]
+      start_period: 2m
+      interval: 30s
+      retries: 5
+    volumes:
+      - ./data:/data
+      - ./modpacks:/modpacks
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      # Game port (TCP)
+      - traefik.tcp.routers.minecraft.rule=HostSNI(`*`)
+      - traefik.tcp.routers.minecraft.entrypoints=minecraft
+      - traefik.tcp.services.minecraft.loadbalancer.server.port=25565
+      # Plan web UI (HTTP)
+      - traefik.http.routers.minecraft-plan.rule=Host(`${PLAN_DOMAIN:-plan-atmc.${DOMAIN}}`)
+      - traefik.http.routers.minecraft-plan.entrypoints=websecure
+      - traefik.http.routers.minecraft-plan.tls=true
+      - traefik.http.routers.minecraft-plan.tls.certresolver=letsencrypt
+      - traefik.http.routers.minecraft-plan.middlewares=local-only@file
+      - traefik.http.services.minecraft-plan.loadbalancer.server.port=8804
+    networks:
+      - default
+      - web
+
+  minecraft-backup:
+    container_name: minecraft-backup
+    security_opt:
+      - no-new-privileges:true
+    image: itzg/mc-backup:2026.6.1
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    depends_on:
+      minecraft:
+        condition: service_healthy
+    stop_grace_period: 5m
+    environment:
+      SRC_DIR: ${SRC_DIR}
+      BK_DIR: ${BK_DIR}
+      WEB_HOST: ${WEB_HOST}
+      WEB_BK: ${WEB_BK}
+      BACKUP_INTERVAL: "2h"
+      BACKUP_KEEP_COUNT: "2"
+      RCON_HOST: minecraft
+      PRE_BACKUP_SCRIPT: /scripts/pre-backup.sh
+      POST_BACKUP_SCRIPT_FILE: /scripts/post-backup.sh
+      INITIAL_DELAY: 0
+      PAUSE_IF_NO_PLAYERS: "true"
+    volumes:
+      - ./data:/data
+      - ./mc-backups:/backups
+      - ./scripts/post-backup.sh:/scripts/post-backup.sh:ro
+      - ./scripts/pre-backup.sh:/scripts/pre-backup.sh:ro
+      - ./infra/ssh:/root/.ssh:ro
+
+networks:
+  web:
+    external: true
+    name: web

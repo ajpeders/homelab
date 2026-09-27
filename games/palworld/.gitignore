@@ -1,0 +1,5 @@
+# Server install + world saves (large binaries / runtime data — not for git)
+game/
+
+# Secrets (admin/server passwords) — .env.example is the committed template
+.env

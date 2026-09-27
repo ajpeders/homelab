@@ -1,0 +1,25 @@
+services:
+  # Static "service offline" page. No Traefik labels of its own — it's wired in
+  # via the file-provider `offline` router/service in traefik/dynamic.yml, which
+  # matches any *.<DOMAIN> host at priority 2. A live docker router (higher
+  # default priority) wins whenever its container is up; when it's down, this
+  # fallback beats the priority-1 catch-all and shows a real offline page
+  # instead of a confusing redirect.
+  offline-page:
+    image: nginx:1.31-alpine
+    container_name: offline-page
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./offline.html:/usr/share/nginx/html/offline.html:ro
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

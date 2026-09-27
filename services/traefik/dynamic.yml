@@ -1,0 +1,140 @@
+http:
+  middlewares:
+    local-only:
+      ipAllowList:
+        sourceRange:
+          - "10.0.0.0/8"
+          - "172.16.0.0/12"
+          - "192.168.1.0/16"
+          - "127.0.0.1/32"
+          - "10.9.0.0/24"
+          - "172.28.0.0/16"
+          # Tailscale's CGNAT range. Tailnet clients arrive with a 100.x source,
+          # which is NOT inside any RFC1918 block above — without this, every
+          # *.<DOMAIN> request over Tailscale 403s while the identical
+          # request over WireGuard (10.9.0.0/24) works, which reads as
+          # "Tailscale is broken" rather than "the allowlist doesn't know it".
+          - "100.64.0.0/10"
+          # IPv6. The LAN is dual-stack and IPv6 has no NAT, so a device on the
+          # home network reaches Traefik from its own *public* GUA in the ISP
+          # prefix below — it matches none of the RFC1918 ranges above and 403s.
+          # AdGuard serves no AAAA, so this only bites clients that resolved via
+          # public DNS (phone on wake, non-AdGuard resolver): they get the
+          # wildcard's AAAA and connect over v6 while IPv4 clients work fine.
+          # Symptom is "the site broke on my phone" with a clean access log on
+          # every IPv4 probe. fd00::/8 covers both the LAN ULA and Tailscale's
+          # fd7a:115c:a1e0::/48, the v6 counterpart of 100.64.0.0/10 above.
+          - "::1/128"
+          - "fe80::/10"
+          - "fd00::/8"
+          # LAN GUA /64 from LAN_IPV6_PREFIX (services/.env); omitted when empty.
+          # If these 403s ever return, check this prefix first — the ISP can
+          # rotate it, and nothing warns you when it no longer matches.
+{{- with env "LAN_IPV6_PREFIX" }}
+          - "{{ . }}"
+{{- end }}
+          # To allow a specific external IP without VPN, add it here locally (not committed):
+          # - "1.2.3.4/32"
+    api-rate-limit:
+      rateLimit:
+        average: 50
+        burst: 100
+    # Baseline security response headers, applied to every websecure router via
+    # the entrypoint (see --entrypoints.websecure.http.middlewares in the
+    # traefik compose command). Deliberately conservative — no frame-options
+    # (some services embed players cross-origin) and no CSP (would need
+    # per-app tuning). HSTS is safe here: every host is HTTPS-only via the
+    # web->websecure redirect. No includeSubDomains/preload to avoid affecting
+    # sibling *.<DOMAIN> hosts.
+    security-headers:
+      headers:
+        stsSeconds: 31536000
+        contentTypeNosniff: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        customResponseHeaders:
+          X-Powered-By: ""
+          Server: ""
+    # Optional auth at the gateway level. Generate htpasswd hashes and replace values.
+    # api-auth:
+    #   basicAuth:
+    #     users:
+    #       - "admin:$apr1$replace$with-real-hash"
+
+  routers:
+    # The bare domain (and www): the `offline` HostRegexp below needs at
+    # least one label, so these would otherwise fall to the catch-all.
+    apex:
+      rule: Host(`{{ env "DOMAIN" }}`) || Host(`www.{{ env "DOMAIN" }}`)
+      entryPoints:
+        - websecure
+      middlewares:
+        - local-only
+      tls:
+        certResolver: letsencrypt
+      service: offline
+    # Offline fallback: any <DOMAIN> host whose real (docker) router isn't
+    # currently live lands here and gets a proper "service offline" page instead
+    # of a confusing redirect. Priority 2 so it sits ABOVE the catch-all
+    # (1) but BELOW every live service router (docker routers default to
+    # rule-length priority, ~25+), which therefore win whenever their container
+    # is up. Do NOT give service routers an explicit priority of 2 — that would
+    # tie with this one.
+    offline:
+      rule: HostRegexp(`^[a-z0-9-]+\.{{ env "DOMAIN" | replace "." "\\." }}$`)
+      entryPoints:
+        - websecure
+      priority: 2
+      middlewares:
+        - local-only
+      tls:
+        certResolver: letsencrypt
+      service: offline
+    # Catch-all: anything else (raw IP, wrong Host header, foreign host,
+    # stale DNS) gets the offline page. Lowest priority so named
+    # routers and the offline fallback win when their rule matches.
+    catchall:
+      rule: PathPrefix(`/`)
+      entryPoints:
+        - websecure
+      priority: 1
+      middlewares:
+        - local-only
+      tls:
+        certResolver: letsencrypt
+      service: offline
+
+  services:
+    offline:
+      loadBalancer:
+        servers:
+          - url: http://offline-page:80
+    noop:
+      loadBalancer:
+        servers:
+          - url: http://127.0.0.1:1
+
+tcp:
+  middlewares:
+    # local-only covers RFC1918 + WireGuard 10.8/24 + Tailscale CGNAT 100.64/10,
+    # plus the IPv6 counterparts. Without 100.64/10, *.<DOMAIN> 403s over
+    # Tailscale but works over WireGuard, reading as "Tailscale is broken" rather
+    # than "allowlist doesn't know Tailscale". The IPv6 entries are the same trap
+    # one layer down: the LAN is dual-stack and v6 has no NAT, so a LAN device
+    # arrives from a public GUA that matches no RFC1918 range. Keep both copies
+    # of this middleware in sync — http above, tcp here.
+    local-only:
+      ipAllowList:
+        sourceRange:
+          - "10.0.0.0/8"
+          - "172.16.0.0/12"
+          - "192.168.1.0/16"
+          - "127.0.0.1/32"
+          - "10.9.0.0/24"
+          - "172.28.0.0/16"
+          - "100.64.0.0/10"
+          - "::1/128"
+          - "fe80::/10"
+          - "fd00::/8"
+{{- with env "LAN_IPV6_PREFIX" }}
+          - "{{ . }}"
+{{- end }}

@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# monitor — homelab health/disk/backup watchdog. Run every ~15 min by
+# homelab-monitor.timer. Emits ntfy alerts via bin/ntfy-alert.
+#
+# Checks:
+#   - disk usage on watched mounts (>= threshold%)
+#   - containers reporting Docker health = unhealthy
+#   - containers that SHOULD run (restart policy always/unless-stopped) but are
+#     not running — excluding an ignore-list of intentionally-stopped services
+#   - USB backup freshness (latest snapshot older than 26h → nightly likely failed)
+#   - remote backup freshness on BACKUP_REMOTE_HOST over SSH (unreachable OR latest >26h)
+#   - recent ntfy-alert publish failures (state/monitor/ntfy-failures.log)
+#
+# De-dup: an active problem alerts ONCE, then re-alerts only every RENOTIFY
+# seconds while it persists; when it clears, a one-shot "resolved" note is sent.
+# State lives in state/monitor/active-alerts (key<TAB>epoch_last_alerted).
+set -uo pipefail
+
+REPO="${HOMELAB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+# Host config (MONITOR_*, BACKUP_*) from services/.env; caller env wins.
+. "$REPO/bin/lib/env.sh"
+ALERT="$REPO/bin/ntfy-alert"
+STATE_DIR="$REPO/state/monitor"
+STATEFILE="$STATE_DIR/active-alerts"
+mkdir -p "$STATE_DIR"
+touch "$STATEFILE"
+
+NOW=$(date +%s)
+RENOTIFY=$((24 * 3600))          # re-alert a still-active problem once a day
+DISK_THRESHOLD="${MONITOR_DISK_PCT:-90}"
+WATCH_MOUNTS="${MONITOR_MOUNTS:-/ ${BACKUP_USB_MOUNT:-}}"
+# Per-mount threshold overrides ("mount=pct" space-separated), for a disk that
+# legitimately runs high (e.g. a USB mirror that also holds other backups).
+DISK_OVERRIDES="${MONITOR_DISK_OVERRIDES:-}"
+
+_threshold_for() {
+  local mount="$1" o
+  for o in $DISK_OVERRIDES; do
+    [[ "${o%%=*}" == "$mount" ]] && { echo "${o##*=}"; return; }
+  done
+  echo "$DISK_THRESHOLD"
+}
+# Containers deliberately kept down — never alert that these are not running.
+# palworld is here because bin/palworld-idle stops it after ~30 min with no
+# players — a stopped palworld is its normal resting state, not a fault.
+IGNORE_DOWN="${MONITOR_IGNORE_DOWN:-plan-minecraft minecraft minecraft-backup plan-minecraft-atm10 minecraft-backup-atm10 sons-of-the-forest portainer palworld}"
+
+declare -A CUR                   # key -> human-readable problem message
+
+# --- disk usage ---------------------------------------------------------------
+for m in $WATCH_MOUNTS; do
+  pct=$(df --output=pcent "$m" 2>/dev/null | tail -1 | tr -dc '0-9')
+  [[ -z "$pct" ]] && continue
+  thr=$(_threshold_for "$m")
+  if (( pct >= thr )); then
+    avail=$(df -h --output=avail "$m" 2>/dev/null | tail -1 | tr -d ' ')
+    CUR["disk:$m"]="Disk ${m} at ${pct}% used (avail ${avail}, threshold ${thr}%)"
+  fi
+done
+
+# --- unhealthy containers -----------------------------------------------------
+while read -r name; do
+  [[ -z "$name" ]] && continue
+  CUR["health:$name"]="Container '${name}' is UNHEALTHY (Docker healthcheck failing)"
+done < <(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null)
+
+# --- unexpectedly-down containers ---------------------------------------------
+# Something with restart=always/unless-stopped that isn't running = a fault,
+# unless it's on the intentional ignore-list.
+while read -r name state; do
+  [[ -z "$name" ]] && continue
+  [[ "$state" == "running" ]] && continue
+  skip=0
+  for ig in $IGNORE_DOWN; do [[ "$name" == "$ig" ]] && { skip=1; break; }; done
+  (( skip )) && continue
+  rp=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null)
+  [[ "$rp" == "always" || "$rp" == "unless-stopped" ]] || continue
+  CUR["down:$name"]="Container '${name}' is DOWN (state=${state}, restart=${rp}) — expected running"
+done < <(docker ps -a --format '{{.Names}} {{.State}}' 2>/dev/null)
+
+# --- backup freshness ---------------------------------------------------------
+latest=$(readlink -f "${BACKUP_USB_MOUNT:-/nonexistent}/server-backups/latest" 2>/dev/null)
+if [[ -z "${BACKUP_USB_MOUNT:-}" ]]; then
+  :   # no USB mirror configured
+elif [[ -n "$latest" && -d "$latest" ]]; then
+  age_h=$(( (NOW - $(stat -c %Y "$latest")) / 3600 ))
+  (( age_h > 26 )) && CUR["backup:stale"]="USB backup 'latest' is ${age_h}h old (>26h) — nightly backup may not have run"
+else
+  CUR["backup:missing"]="USB backup 'latest' snapshot is missing"
+fi
+
+# --- remote backup freshness -------------------------------------------------
+# The remote leg died silently for 17 nights in Aug 2026 while the USB check
+# stayed green — the one leg that failed was the one nothing watched. An
+# unreachable box is itself the alert: the second target exists precisely to
+# survive losing the first building. Uses the same key + pinned host key as
+# bin/backup; skipped (with a log line) when the key isn't readable, so a
+# manual run by a non-root user doesn't false-alarm "unreachable".
+# Same BACKUP_* settings as bin/backup (both read services/.env).
+REMOTE_SSH_KEY="${BACKUP_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+REMOTE_HOST="${BACKUP_REMOTE_HOST:-}"
+REMOTE_USER="${BACKUP_REMOTE_USER:-$(id -un)}"
+if [[ "${MONITOR_REMOTE_CHECK:-1}" == 1 && -n "$REMOTE_HOST" ]]; then
+  if [[ -r "$REMOTE_SSH_KEY" ]]; then
+    remote_ts=$(ssh -i "$REMOTE_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 \
+        -o StrictHostKeyChecking=yes \
+        -o UserKnownHostsFile="${BACKUP_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}" \
+        "$REMOTE_USER@$REMOTE_HOST" \
+        "stat -c %Y \"\$(readlink -f '${BACKUP_REMOTE_DIR:-}/latest')\" 2>/dev/null" 2>/dev/null)
+    if [[ -z "$remote_ts" ]]; then
+      CUR["backup:remote"]="Remote backup target $REMOTE_HOST unreachable or 'latest' snapshot missing — off-box DR is not landing"
+    else
+      age_h=$(( (NOW - remote_ts) / 3600 ))
+      (( age_h > 26 )) && CUR["backup:remote"]="Remote backup ($REMOTE_HOST) 'latest' is ${age_h}h old (>26h) — remote leg failing"
+    fi
+  else
+    echo "[monitor] skipping remote backup check: $REMOTE_SSH_KEY not readable by $(whoami)"
+  fi
+fi
+
+# --- alert-path failures ------------------------------------------------------
+# ntfy-alert appends here when BOTH publish paths fail. Surfacing it on the
+# next tick means a transient 2am failure (e.g. during the backup window)
+# still produces an alert once the path recovers.
+FAILLOG="$STATE_DIR/ntfy-failures.log"
+if [[ -s "$FAILLOG" ]]; then
+  recent=$(awk -F'\t' -v cutoff=$((NOW - 24*3600)) '$1 >= cutoff' "$FAILLOG" | wc -l)
+  (( recent > 0 )) && CUR["alerting:ntfy-failed"]="ntfy-alert failed to publish ${recent} time(s) in the last 24h — alerts may have been lost (see state/monitor/ntfy-failures.log)"
+fi
+
+# --- diff against prior state, notify, persist --------------------------------
+declare -A LAST
+while IFS=$'\t' read -r k t; do
+  [[ -n "$k" ]] && LAST["$k"]="$t"
+done < "$STATEFILE"
+
+NEWSTATE=$(mktemp)
+
+# New / still-active problems. The ${CUR[@]+...} guard keeps an EMPTY assoc
+# array from tripping `set -u` (bash treats an empty array ref as unbound) —
+# this is the all-clear path, i.e. the common case.
+for k in ${CUR[@]+"${!CUR[@]}"}; do
+  last="${LAST[$k]:-0}"
+  if (( NOW - last >= RENOTIFY )); then
+    if "$ALERT" high rotating_light "homelab: problem" "${CUR[$k]}"; then
+      last="$NOW"                # only advance the clock if the alert actually sent
+    fi
+  fi
+  printf '%s\t%s\n' "$k" "$last" >> "$NEWSTATE"
+done
+
+# Resolved problems (were active last run, gone now)
+for k in ${LAST[@]+"${!LAST[@]}"}; do
+  if [[ -z "${CUR[$k]+x}" ]]; then
+    "$ALERT" default white_check_mark "homelab: resolved" "Cleared: ${k}" || true
+  fi
+done
+
+# Group-writable so both the root timer run and a manual (homelab-group) run can
+# rewrite it; the state dir is setgid homelab.
+chmod 664 "$NEWSTATE" 2>/dev/null || true
+mv "$NEWSTATE" "$STATEFILE"
+
+# Summarize to stdout for journalctl.
+if [[ ${CUR[*]+set} ]]; then
+  echo "[monitor] ${#CUR[@]} active problem(s): ${!CUR[*]}"
+else
+  echo "[monitor] all clear"
+fi

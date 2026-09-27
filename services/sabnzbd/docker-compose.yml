@@ -1,0 +1,38 @@
+services:
+  sabnzbd:
+    container_name: sabnzbd
+    security_opt:
+      - no-new-privileges:true
+    image: lscr.io/linuxserver/sabnzbd:5.0.4-ls259
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      PUID: ${PUID:?set PUID in services/.env}
+      PGID: ${PGID:?set PGID in services/.env}
+      TZ: ${TZ:-UTC}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS \"http://localhost:8080/api?mode=version\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ../../state/sabnzbd:/config
+      - ${SABNZBD_MEDIA_PATH:-${SHARE_DIR:?set SHARE_DIR in services/.env}/media}:/data
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.sabnzbd.rule=Host(`${SABNZBD_DOMAIN:-sabnzbd.${DOMAIN}}`)
+      - traefik.http.routers.sabnzbd.entrypoints=websecure
+      - traefik.http.routers.sabnzbd.tls=true
+      - traefik.http.routers.sabnzbd.tls.certresolver=letsencrypt
+      - traefik.http.routers.sabnzbd.middlewares=local-only@file
+      - traefik.http.services.sabnzbd.loadbalancer.server.port=8080
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

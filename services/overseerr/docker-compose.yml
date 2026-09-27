@@ -1,0 +1,37 @@
+services:
+  overseerr:
+    container_name: overseerr
+    security_opt:
+      - no-new-privileges:true
+    image: sctx/overseerr:1.35.0
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
+    environment:
+      TZ: ${TZ:-UTC}
+      LOG_LEVEL: info
+      PORT: 5055
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5055/api/v1/status || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ../../state/overseerr:/app/config
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.overseerr.rule=Host(`${OVERSEERR_DOMAIN:-overseerr.${DOMAIN}}`)
+      - traefik.http.routers.overseerr.entrypoints=websecure
+      - traefik.http.routers.overseerr.tls=true
+      - traefik.http.routers.overseerr.tls.certresolver=letsencrypt
+      - traefik.http.routers.overseerr.middlewares=local-only@file
+      - traefik.http.services.overseerr.loadbalancer.server.port=5055
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

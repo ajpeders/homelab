@@ -1,0 +1,108 @@
+services:
+  forgejo-db:
+    container_name: forgejo-db
+    security_opt:
+      - no-new-privileges:true
+    image: postgres:16.14
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    environment:
+      POSTGRES_DB: forgejo
+      POSTGRES_USER: forgejo
+      POSTGRES_PASSWORD: ${FORGEJO_DB_PASSWORD}
+    volumes:
+      - ../../state/forgejo/db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgejo"]
+      interval: 5s
+      retries: 10
+
+  forgejo:
+    container_name: forgejo
+    image: codeberg.org/forgejo/forgejo:15.0.3
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    memswap_limit: 1g
+    ports:
+      - "${LAN_BIND_IP:-${LAN_IP:?set LAN_IP in services/.env}}:2222:22"
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      forgejo-db:
+        condition: service_healthy
+    environment:
+      USER_UID: 1000
+      USER_GID: 1000
+      FORGEJO__database__DB_TYPE: postgres
+      FORGEJO__database__HOST: forgejo-db:5432
+      FORGEJO__database__NAME: forgejo
+      FORGEJO__database__USER: forgejo
+      FORGEJO__database__PASSWD: ${FORGEJO_DB_PASSWORD}
+      FORGEJO__server__DOMAIN: ${FORGEJO_DOMAIN:-git.${DOMAIN}}
+      FORGEJO__server__ROOT_URL: https://${FORGEJO_DOMAIN:-git.${DOMAIN}}
+      FORGEJO__server__SSH_DOMAIN: ${FORGEJO_DOMAIN:-git.${DOMAIN}}
+      FORGEJO__server__SSH_PORT: 2222
+      FORGEJO__server__LOCAL_ROOT_URL: http://localhost:3000
+      FORGEJO__repository__DEFAULT_REPO_UNITS: "repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects,repo.packages"
+      # Let a user create a repo in their own namespace just by pushing to it.
+      FORGEJO__repository__ENABLE_PUSH_CREATE_USER: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ../../state/forgejo/data:/data
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.forgejo.rule=Host(`${FORGEJO_DOMAIN:-git.${DOMAIN}}`)
+      - traefik.http.routers.forgejo.entrypoints=websecure
+      - traefik.http.routers.forgejo.tls=true
+      - traefik.http.routers.forgejo.tls.certresolver=letsencrypt
+      - traefik.http.routers.forgejo.middlewares=local-only@file
+      - traefik.http.services.forgejo.loadbalancer.server.port=3000
+    networks:
+      - web
+      - default
+      # ci-jobs: lets CI job containers resolve + reach `forgejo:3000` to clone.
+      - ci-jobs
+
+  forgejo-runner:
+    container_name: forgejo-runner
+    image: code.forgejo.org/forgejo/runner:12.12.0
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
+    user: root
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - forgejo
+    environment:
+      FORGEJO_RUNNER_REGISTRATION_TOKEN: ${FORGEJO_RUNNER_TOKEN}
+    volumes:
+      - ../../state/forgejo/runner:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./runner-config/config.yml:/config.yml:ro
+    working_dir: /data
+    command: >-
+      bash -c "forgejo-runner register --no-interactive --instance http://forgejo:3000 --token $$FORGEJO_RUNNER_REGISTRATION_TOKEN --name hl-runner --labels ubuntu-latest:docker://node:20 --config /config.yml || true && forgejo-runner daemon --config /config.yml"
+
+networks:
+  web:
+    external: true
+    name: web
+  # Dedicated network for CI job containers (runner-config/config.yml sets
+  # container.network: "ci-jobs"). Fixed subnet so the ci-net-guard firewall
+  # unit (bin/systemd/ci-net-guard.service) can block jobs from reaching the
+  # LAN / other RFC1918 ranges while still allowing internet egress.
+  ci-jobs:
+    name: ci-jobs
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

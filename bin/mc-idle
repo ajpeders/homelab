@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# mc-idle — stop whichever Minecraft server is running once nobody has been on
+# for a while. Run every ~10 min by homelab-mc-idle.timer.
+#
+# Same rationale as bin/palworld-idle: a modded MC server holds 7-12G resident
+# (and swaps the box hard) whether or not anyone is playing. Idling it out
+# reclaims that RAM. Only one instance runs at a time (see bin/mc-switch), but
+# this checks both so it keeps working whichever one is active.
+#
+# Restart is deliberately MANUAL: bin/mc-switch <vanilla|atm10>. Both instances
+# are already in bin/monitor's IGNORE_DOWN, so an idled-out server is not
+# reported as a fault.
+set -uo pipefail
+
+REPO="${HOMELAB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+STATE_DIR="$REPO/state/minecraft"
+LOG="$STATE_DIR/idle.log"
+CONTAINERS=(plan-minecraft plan-minecraft-atm10)
+
+# Consecutive empty polls before stopping, against the 10-minute timer.
+# 72 × 10 min = ~12 hours — same reasoning as palworld-idle: an evening
+# session ending shouldn't force a restart the same night; the RAM is only
+# worth reclaiming once nobody has played all day.
+IDLE_CHECKS="${MC_IDLE_CHECKS:-72}"
+# Modded boot (mod loading + world init) easily takes minutes and RCON refuses
+# connections the whole time. An unreachable RCON is NOT evidence of zero
+# players, and a booting server must not be judged at all.
+MIN_UPTIME_S="${MC_MIN_UPTIME_S:-900}"
+
+mkdir -p "$STATE_DIR"
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
+
+for c in "${CONTAINERS[@]}"; do
+  COUNTER="$STATE_DIR/idle-checks.$c"
+
+  running="$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null || echo false)"
+  if [[ "$running" != "true" ]]; then
+    # Already down (idled out, switched away, or stopped by hand). Clear the
+    # counter so a fresh start gets a full grace period.
+    [[ -f "$COUNTER" ]] && rm -f "$COUNTER"
+    continue
+  fi
+
+  started_at="$(docker inspect -f '{{.State.StartedAt}}' "$c" 2>/dev/null)"
+  uptime_s=$(( $(date +%s) - $(date -d "$started_at" +%s 2>/dev/null || echo 0) ))
+  if (( uptime_s < MIN_UPTIME_S )); then
+    continue
+  fi
+
+  # `list` prints "There are N of a max of M players online: ..."
+  players_raw="$(docker exec "$c" rcon-cli list 2>/dev/null)"
+  rcon_rc=$?
+  players="$(grep -oE 'There are [0-9]+' <<<"$players_raw" | grep -oE '[0-9]+')"
+  if (( rcon_rc != 0 )) || [[ -z "$players" ]]; then
+    # RCON did not answer with something we recognise. Treat as unknown, not
+    # as empty — never stop a server we could not actually poll.
+    log "$c: rcon unavailable (rc=$rcon_rc) — skipping this check"
+    continue
+  fi
+
+  if (( players > 0 )); then
+    if [[ -f "$COUNTER" ]]; then
+      log "$c: $players player(s) online — resetting idle counter"
+      rm -f "$COUNTER"
+    fi
+    continue
+  fi
+
+  n=$(( $(cat "$COUNTER" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$COUNTER"
+
+  if (( n < IDLE_CHECKS )); then
+    # Log the first check and then hourly so the countdown is visible without
+    # burying the lines that matter (resets, stops, RCON faults).
+    if (( n == 1 || n % 6 == 0 )); then
+      log "$c: empty ($n/$IDLE_CHECKS) — waiting"
+    fi
+    continue
+  fi
+
+  _idle_mins=$(( n * 10 ))
+  if (( _idle_mins >= 120 )); then
+    _idle_human="~$(( _idle_mins / 60 )) hours"
+  else
+    _idle_human="~${_idle_mins} min"
+  fi
+
+  case "$c" in
+    plan-minecraft) _switch_arg="vanilla" ;;
+    *) _switch_arg="${c##*-}" ;;
+  esac
+
+  log "$c: empty for $n consecutive checks ($_idle_human) — saving and stopping"
+  docker exec "$c" rcon-cli save-all >/dev/null 2>&1 || log "$c: warning: pre-stop save failed"
+  # mc-switch off stops both instances AND their mc-backup sidecars, honoring
+  # the 5m stop_grace_period; stopping an already-stopped container is a no-op.
+  if "$REPO/bin/mc-switch" off >/dev/null 2>&1; then
+    rm -f "$COUNTER"
+    log "$c: stopped"
+    "$REPO/bin/ntfy-alert" low zzz "minecraft idled out" \
+      "$c: no players for $_idle_human — server stopped. Restart: /minecraft start $_switch_arg in Discord, the dashboard, or bin/mc-switch $_switch_arg." || true
+  else
+    log "$c: ERROR: mc-switch off failed"
+  fi
+done

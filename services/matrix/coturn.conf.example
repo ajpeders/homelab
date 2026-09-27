@@ -1,0 +1,30 @@
+# coturn / TURN server config for Matrix + Element Call.
+# Copy to coturn.conf and fill in host-specific values. coturn.conf is
+# gitignored because it holds static-auth-secret.
+
+listening-port=3478
+
+# relay-ip and the second half of external-ip must be THIS host's LAN IP.
+# Check with: ip -4 -br addr show | grep -v docker
+# (If the host's LAN IP changes, TURN relay allocations break until updated.)
+relay-ip=192.168.1.10
+# external-ip = <public-ip>/<lan-ip>. Public IP from: curl -s -4 ifconfig.me
+external-ip=PUBLIC_IP/192.168.1.10
+
+# Relay port range opened on the host/router for TURN media.
+min-port=49152
+max-port=49399
+
+realm=chat.example.com
+
+# Long-term credential mechanism: time-limited HMAC creds derived from the
+# shared secret. This value MUST match turn.turn_shared_secret in dendrite.yaml.
+use-auth-secret
+static-auth-secret=REPLACE_WITH_SHARED_SECRET
+
+# No TLS/DTLS on TURN itself; WebRTC media is already DTLS-SRTP encrypted.
+no-tls
+no-dtls
+
+log-file=stdout
+simple-log

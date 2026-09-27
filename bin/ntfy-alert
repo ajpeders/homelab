@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# ntfy-alert — publish a homelab alert to the local ntfy instance.
+#
+# Usage: ntfy-alert <priority> <tags> <title> <message>
+#   priority: min|low|default|high|urgent   (ntfy priority)
+#   tags:     comma-sep emoji shortcodes, e.g. rotating_light,warning
+#
+# Reaches ntfy on 127.0.0.1 (a localhost-only published port) so alerts do NOT
+# depend on Traefik / DNS / TLS being up — the very things an alert might be
+# about. Auth token + topic + url come from services/ntfy/.env (gitignored), so
+# no secret is baked into this script. Never fails the caller: a broken alert
+# path must not abort a backup or a monitor run.
+set -uo pipefail
+
+REPO="${HOMELAB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+CONF="$REPO/services/ntfy/.env"
+# Caller environment wins over the conf file (so tests / one-offs can point at
+# a different server): stash any pre-set values and restore them after sourcing.
+_env_url="${NTFY_ALERT_URL:-}"; _env_topic="${NTFY_ALERT_TOPIC:-}"; _env_token="${NTFY_ALERT_TOKEN:-}"
+# shellcheck disable=SC1090
+[[ -f "$CONF" ]] && { set -a; . "$CONF"; set +a; }
+[[ -n "$_env_url" ]] && NTFY_ALERT_URL="$_env_url"
+[[ -n "$_env_topic" ]] && NTFY_ALERT_TOPIC="$_env_topic"
+[[ -n "$_env_token" ]] && NTFY_ALERT_TOKEN="$_env_token"
+
+URL="${NTFY_ALERT_URL:-http://127.0.0.1:8092}"
+# Fallback publish path if the localhost port fails (ntfy container down, port
+# not published yet at boot): the Traefik ingress route. Depends on Traefik/
+# DNS/TLS — the opposite trade-off of the primary — so between them one is
+# usually up.
+DOMAIN="${DOMAIN:-$(sed -n 's/^DOMAIN=//p' "$REPO/services/.env" 2>/dev/null | tail -1)}"
+FALLBACK_URL="${NTFY_ALERT_FALLBACK_URL:-https://${NTFY_DOMAIN:-ntfy.$DOMAIN}}"
+TOPIC="${NTFY_ALERT_TOPIC:-homelab-alerts}"
+TOKEN="${NTFY_ALERT_TOKEN:-}"
+FAILLOG="$REPO/state/monitor/ntfy-failures.log"
+
+prio="${1:-default}"; tags="${2:-warning}"; title="${3:-homelab}"; msg="${4:-}"
+
+auth=()
+[[ -n "$TOKEN" ]] && auth=(-H "Authorization: Bearer $TOKEN")
+
+_publish() {
+  curl -fsS --max-time 10 "${auth[@]}" \
+    -H "Title: $title" -H "Priority: $prio" -H "Tags: $tags" \
+    -d "$msg" "$1/$TOPIC" >/dev/null 2>&1
+}
+
+_publish "$URL" && exit 0
+_publish "$FALLBACK_URL" && exit 0
+
+# Both paths failed. Be loud everywhere we can from inside the box: journald at
+# err (so it shows in `journalctl -p err`), stderr, and a persistent failure
+# log that bin/monitor checks each tick — so a transient 2am failure still
+# surfaces as an alert once the path recovers.
+echo "[ntfy-alert] WARN: failed to publish to $URL/$TOPIC (and fallback $FALLBACK_URL)" >&2
+logger -t ntfy-alert -p user.err "failed to publish '$title' to $TOPIC (primary $URL + fallback $FALLBACK_URL)" 2>/dev/null || true
+if mkdir -p "$(dirname "$FAILLOG")" 2>/dev/null; then
+  printf '%s\t%s\t%s\n' "$(date +%s)" "$(date -Is)" "$title" >> "$FAILLOG" 2>/dev/null || true
+  chmod 664 "$FAILLOG" 2>/dev/null || true
+fi
+exit 1

@@ -1,0 +1,73 @@
+services:
+  palworld:
+    container_name: palworld
+    security_opt:
+      - no-new-privileges:true
+    # Community-standard Palworld server image. Upstream publishes semver tags;
+    # pin here for reproducibility and bump deliberately.
+    image: thijsvanloef/palworld-server-docker:v2.5.1
+    restart: unless-stopped
+    mem_limit: 12g
+    memswap_limit: 12g
+    stop_grace_period: 30s
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      # Server config
+      PORT: "${PORT:-8211}"
+      PLAYERS: "${PLAYERS:-16}"
+      SERVER_NAME: "${SERVER_NAME}"
+      SERVER_DESCRIPTION: "${SERVER_DESCRIPTION}"
+      SERVER_PASSWORD: "${SERVER_PASSWORD}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
+      # The image variable is COMMUNITY, NOT COMMUNITY_SERVER. This was set as
+      # COMMUNITY_SERVER for weeks (2026-08-12 fix): the image ignored it, so
+      # `-publiclobby` was never added to the launch command and the server
+      # never registered with the public lobby — invisible in the community
+      # browser to EVERYONE (PC search and console alike), while still joinable
+      # by direct IP. That symptom read like a console limitation; it was a
+      # variable-name typo. Verify with: the running PalServer process must show
+      # `-publiclobby` in its args when this is true.
+      COMMUNITY: "${COMMUNITY:-false}"
+      # What the server advertises to the browser. Was missing entirely until
+      # 2026-08-12, so PublicIP stayed "" and the server fell back to
+      # auto-detection — which inside Docker sees a private address, so the
+      # listing had nothing joinable to publish.
+      # NOTE: a literal IP goes stale if the ISP rotates it; if the listing
+      # disappears, check this first (`curl -4 ifconfig.me` vs games/palworld/.env).
+      PUBLIC_IP: "${PUBLIC_IP:-}"
+      PUBLIC_PORT: "${PUBLIC_PORT:-8211}"
+      MULTITHREADING: "true"
+      # Keep the install patched on (re)start
+      UPDATE_ON_BOOT: "${UPDATE_ON_BOOT:-true}"
+      # RCON (used by the built-in backup + restart helpers)
+      RCON_ENABLED: "true"
+      RCON_PORT: "25575"
+      # Built-in backup + scheduled restart (Palworld leaks memory over time)
+      BACKUP_ENABLED: "true"
+      BACKUP_CRON_EXPRESSION: "0 */6 * * *"
+      DELETE_OLD_BACKUPS: "true"
+      OLD_BACKUP_DAYS: "7"
+      AUTO_UPDATE_ENABLED: "false"
+      RESTART_ENABLED: "true"
+      RESTART_CRON_EXPRESSION: "0 4 * * *"
+    ports:
+      - "8211:8211/udp"    # Game traffic
+      - "27015:27015/udp"  # Steam query
+    healthcheck:
+      # Match the image's built-in probe: the server process must be alive.
+      # First boot downloads ~5GB via SteamCMD, so allow a long start period.
+      test: ["CMD-SHELL", "pgrep PalServer-Linux > /dev/null || exit 1"]
+      start_period: 5m
+      interval: 30s
+      retries: 5
+    volumes:
+      - ./game:/palworld
+    networks:
+      - default
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

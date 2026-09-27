@@ -1,0 +1,44 @@
+services:
+  plex:
+    container_name: plex
+    security_opt:
+      - no-new-privileges:true
+    image: plexinc/pms-docker:1.43.2.10687-563d026ea
+    restart: unless-stopped
+    mem_limit: 3g
+    memswap_limit: 3g
+    environment:
+      TZ: ${TZ:-UTC}
+      PLEX_UID: ${PUID:?set PUID in services/.env}
+      PLEX_GID: ${PGID:?set PGID in services/.env}
+      PLEX_CLAIM: ${PLEX_CLAIM:-}
+      ADVERTISE_IP: http://${PLEX_LAN_IP:-${LAN_IP:?set LAN_IP in services/.env}}:32401
+      ALLOWED_NETWORKS: ${LAN_SUBNET:?set LAN_SUBNET in services/.env},10.9.0.0/24,172.28.0.0/16
+      CHANGE_CONFIG_DIR_OWNERSHIP: "true"
+    volumes:
+      - ../../state/plex:/config
+      - ${PLEX_MEDIA_PATH:-${SHARE_DIR:?set SHARE_DIR in services/.env}/media}:/data:ro
+    tmpfs:
+      - /transcode:size=4g,mode=1777
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "988"
+      - "984"
+    ports:
+      - "32401:32400/tcp"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.plex.rule=Host(`${PLEX_DOMAIN:-plex.${DOMAIN}}`)
+      - traefik.http.routers.plex.entrypoints=websecure
+      - traefik.http.routers.plex.tls=true
+      - traefik.http.routers.plex.tls.certresolver=letsencrypt
+      - traefik.http.services.plex.loadbalancer.server.port=32400
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

@@ -1,0 +1,42 @@
+services:
+  searxng:
+    container_name: searxng
+    # RETIRED 2026-09-19 — removed from active stack. Service retained behind
+    # `profiles: ["deprecated"]` per repo convention; include commented out in
+    # services/docker-compose.yml. Restore with:
+    #   docker compose --profile deprecated up -d
+    # See audit.md entry from 2026-09-19 for rationale.
+    profiles: ["deprecated"]
+    security_opt:
+      - no-new-privileges:true
+    image: searxng/searxng:2026.6.20-fd42d4fda
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    environment:
+      - BASE_URL=https://${SEARXNG_DOMAIN:-searx.${DOMAIN}}/
+      - SEARXNG_BASE_URL=https://${SEARXNG_DOMAIN:-searx.${DOMAIN}}/
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.searxng.rule=Host(`${SEARXNG_DOMAIN:-searx.${DOMAIN}}`)
+      - traefik.http.routers.searxng.entrypoints=websecure
+      - traefik.http.routers.searxng.tls=true
+      - traefik.http.routers.searxng.tls.certresolver=letsencrypt
+      - traefik.http.routers.searxng.middlewares=local-only@file
+      - traefik.http.services.searxng.loadbalancer.server.port=8080
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

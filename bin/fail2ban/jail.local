@@ -1,0 +1,79 @@
+# fail2ban jail — homelab Traefik ingress.
+# Install: sudo cp bin/fail2ban/jail.local /etc/fail2ban/jail.local
+#          (merge by hand if you already have a jail.local)
+#          sudo systemctl enable --now fail2ban
+#
+# Bans IPs that rack up repeated 401/403s against Traefik (scanners probing
+# .env/.git/wp-login, brute-force against the public routers). Ingress is a
+# direct port-forward (real attacker IP is the TCP peer), so iptables bans
+# are effective. If you ever put Cloudflare in proxy mode in front, switch to
+# a Cloudflare-API action or the crowdsec traefik bouncer instead — iptables
+# would then only see Cloudflare's IPs.
+
+[DEFAULT]
+# Never ban ourselves or the LAN/VPN.
+#
+# The last two entries are OUR OWN public addresses, and they matter more than
+# they look. Traffic from inside the house that leaves and hairpins back in
+# (phones on cellular, anything resolving the public A/AAAA record, Matrix
+# clients on the WAN side) arrives at Traefik with the household's PUBLIC source
+# address — which is not RFC1918 and so is not covered by the ranges above.
+# Any burst of 403s from such a client therefore bans the whole household's
+# ingress via iptables-allports. That is not hypothetical: 2026-09-18 06:31 a
+# single Matrix client long-polling /_matrix/client/v3/sync produced 373 x 403
+# in ONE minute against maxretry=6/findtime=10m.
+# Ignoring our own addresses costs no protection — a real attacker arrives from
+# some other address, and these only ever carry our own traffic. They are
+# per-host, so they live OUTSIDE the repo in /etc/fail2ban/jail.d/homelab-own.local
+# (template: bin/fail2ban/homelab-own.local.example), which fail2ban reads after
+# this file and whose [DEFAULT] homelab_own_ips fills the %(...)s below:
+#   - this host's own global IPv6 /64 (see `ip -6 addr`)
+#   - the house's public IPv4. RESIDENTIAL AND DYNAMIC: re-check after any
+#     ISP/router change, or it silently protects a stranger instead of you.
+# The last two ranges are iCloud Private Relay egress (Akamai + Cloudflare) and
+# are here for the same reason as our own public addresses above: when a phone
+# has Private Relay on, OUR OWN traffic arrives from them. Every local-only
+# router 403s it (relay IPs are not RFC1918), a PWA retries on a poll loop, and
+# the jail bans the shared egress IP with iptables-allports — so the phone loses
+# the whole host on every port, not just the 403ing route. The symptom is a
+# cached PWA shell that still renders while every API call fails as a network
+# error, and it looks exactly like "all the apps broke at once". Hit 2026-09-21,
+# when 172.226.137.71 was banned and read as a server outage for hours.
+# Costs little protection: anything arriving from these ranges is still 403'd by
+# local-only, and banning shared CDN egress is collateral-prone by nature.
+homelab_own_ips =
+ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.1.0/16
+           %(homelab_own_ips)s
+           172.224.0.0/12 104.28.0.0/16
+bantime  = 1h
+findtime = 10m
+maxretry = 8
+# Modern default; drops via the host firewall's INPUT chain.
+banaction = iptables-allports
+
+[traefik-auth]
+enabled  = true
+filter   = traefik-auth
+logpath  = /opt/homelab/state/traefik/logs/access.log
+port     = http,https
+# Tighter than the global default — repeated auth failures are rarely benign.
+maxretry = 6
+bantime  = 2h
+
+# SSH is port-forwarded, so it is scanned continuously by botnets — 144 failed
+# attempts were in a single 1000-line log window on 2026-08-15, from
+# 195.178.110.218, 110.35.80.116 and 2.57.121.0/24, trying root/test/tyler.
+# Until this jail existed they had UNLIMITED attempts: the only jail was
+# traefik-auth, so nothing throttled sshd at all.
+#
+# Pairs with PasswordAuthentication=no in sshd_config — that is the real fix
+# (it removes the attack outright); this just stops the noise and covers any
+# future account that gets a password.
+[sshd]
+enabled  = true
+port     = ssh
+# systemd journal, not a file — Arch has no /var/log/auth.log.
+backend  = systemd
+maxretry = 4
+findtime = 10m
+bantime  = 24h

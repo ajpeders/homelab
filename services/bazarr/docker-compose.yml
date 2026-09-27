@@ -1,0 +1,40 @@
+services:
+  bazarr:
+    container_name: bazarr
+    security_opt:
+      - no-new-privileges:true
+    image: lscr.io/linuxserver/bazarr:1.5.6
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
+    environment:
+      PUID: ${PUID:?set PUID in services/.env}
+      PGID: ${PGID:?set PGID in services/.env}
+      TZ: ${TZ:-UTC}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:6767/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ../../state/bazarr:/config
+      # Same media root as Sonarr/Radarr (mounted at /data) so Bazarr sees
+      # identical paths and writes .srt sidecars next to the video files.
+      - ${BAZARR_MEDIA_PATH:-${SHARE_DIR:?set SHARE_DIR in services/.env}/media}:/data
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.bazarr.rule=Host(`${BAZARR_DOMAIN:-bazarr.${DOMAIN}}`)
+      - traefik.http.routers.bazarr.entrypoints=websecure
+      - traefik.http.routers.bazarr.tls=true
+      - traefik.http.routers.bazarr.tls.certresolver=letsencrypt
+      - traefik.http.routers.bazarr.middlewares=local-only@file
+      - traefik.http.services.bazarr.loadbalancer.server.port=6767
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

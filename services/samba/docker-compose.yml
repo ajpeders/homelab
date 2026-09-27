@@ -1,0 +1,17 @@
+services:
+  samba:
+    container_name: samba
+    image: crazymax/samba:4.22.8
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    volumes:
+      - ./config.yml:/data/config.yml:ro
+      - ${SMB_FILES_PATH}:/samba/files
+    ports:
+      - "${LAN_BIND_IP:-${LAN_IP:?set LAN_IP in services/.env}}:445:445"
+    # No cap_add: an SMB file server (smbd/nmbd/wsdd) needs no NET_ADMIN — it
+    # was cargo-culted. Dropped 2026-07-08 security review; verified the
+    # container still starts healthy and serves the share.
+    security_opt:
+      - no-new-privileges:true

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# traefik-logrotate — daily rotation for Traefik's JSON access log.
+# Run by homelab-traefik-logrotate.timer (system unit, User=root — the log is
+# written by the container as root).
+#
+# Why not logrotate(8): the repo keeps its operational glue in bin/ with
+# systemd timers installed from bin/systemd/, and this needs a Docker signal
+# rather than a service reload. Traefik reopens its log files on USR1
+# (docs: "Log Rotation"), so the sequence is mv → USR1 → compress. fail2ban
+# follows the path by name and picks up the fresh file on its next poll.
+#
+# The rename must NOT be a copy: copytruncate-style rotation loses whatever
+# Traefik writes between the copy and the truncate.
+set -euo pipefail
+
+REPO="${HOMELAB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+LOG_DIR="$REPO/state/traefik/logs"
+LOG="$LOG_DIR/access.log"
+KEEP="${TRAEFIK_LOG_KEEP:-7}"   # rotated generations (days) to retain
+
+[[ -s "$LOG" ]] || exit 0
+
+# Shift the compressed chain up, dropping the oldest.
+for (( i=KEEP-1; i>=1; i-- )); do
+  [[ -f "$LOG_DIR/access.log.$i.gz" ]] && mv "$LOG_DIR/access.log.$i.gz" "$LOG_DIR/access.log.$((i+1)).gz"
+done
+rm -f "$LOG_DIR/access.log.$((KEEP)).gz" 2>/dev/null || true
+
+mv "$LOG" "$LOG_DIR/access.log.1"
+
+# Traefik holds the old inode until told to reopen. Signal before compressing
+# so the window where new requests land in the renamed file stays tiny.
+if ! docker kill --signal=USR1 traefik >/dev/null 2>&1; then
+  # No traefik container (down/renamed): put the log back rather than leave
+  # the next writes going to a file this script will gzip from under them.
+  mv "$LOG_DIR/access.log.1" "$LOG"
+  echo "traefik-logrotate: could not signal traefik — rotation skipped" >&2
+  exit 1
+fi
+
+gzip -f "$LOG_DIR/access.log.1"

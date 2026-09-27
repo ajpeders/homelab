@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# mc-switch — run at most ONE Minecraft server at a time.
+#
+# Each instance holds 7-12G resident (vanilla pins a 12G heap, ATM10 grows past
+# 10G); the box has 31G and both together exhausted swap (2026-09-08). This
+# script is the only supported way to start either server: it stops the other
+# instance first, so the pair can never run concurrently.
+#
+# Uses container names with docker start/stop, NOT compose. The original reason
+# is gone — vanilla carried a foreign compose project label until 2026-09-18, so
+# `docker compose stop` from this repo exited 0 without touching it; it has since
+# been adopted into this repo's `games` project. Names are still correct here
+# because start/stop on an existing container can never recreate it, which is
+# what you want for a live world: a compose command that decided to recreate
+# would drop the server mid-session.
+# docker stop honors each container's stop grace period — now 5m for BOTH
+# instances (vanilla got `stop_grace_period: 5m` when it was adopted; before that
+# it ran on docker's 10s default, which SIGKILLs the JVM mid-save on a 24G world).
+set -euo pipefail
+
+VANILLA=(plan-minecraft minecraft-backup)
+ATM10=(plan-minecraft-atm10 minecraft-backup-atm10)
+
+status() { docker ps -a --format '{{.Names}}\t{{.Status}}' | grep -i minecraft | sort; }
+
+case "${1:-status}" in
+  vanilla)
+    echo "stopping atm10 (grace period up to 5m)..."
+    docker stop "${ATM10[@]}"
+    docker start "${VANILLA[@]}"
+    status
+    ;;
+  atm10)
+    echo "stopping vanilla (grace period up to 5m)..."
+    docker stop "${VANILLA[@]}"
+    docker start "${ATM10[@]}"
+    status
+    ;;
+  off)
+    docker stop "${VANILLA[@]}" "${ATM10[@]}"
+    status
+    ;;
+  status)
+    status
+    ;;
+  *)
+    echo "usage: mc-switch <vanilla|atm10|off|status>" >&2
+    exit 1
+    ;;
+esac

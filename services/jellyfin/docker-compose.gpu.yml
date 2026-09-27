@@ -1,0 +1,21 @@
+# NVIDIA GPU overlay for jellyfin.
+#
+# `gpus: all` fails startup when the
+# nvidia container runtime isn't installed, so it can't live in the base
+# compose. Chain it via COMPOSE_FILE in services/.env:
+#
+#   COMPOSE_FILE=docker-compose.yml:...:jellyfin/docker-compose.gpu.yml
+#
+# NVIDIA_DRIVER_CAPABILITIES must include `video` — the toolkit default
+# (compute,utility) injects libcuda but not libnvidia-encode/libnvcuvid,
+# so NVENC/NVDEC silently fail.
+#
+# Jellyfin's hardware accel type lives in state (config/encoding.xml,
+# Dashboard → Playback): it must be `nvenc` on this host — VAAPI cannot
+# work on the NVIDIA driver even though /dev/dri exists.
+
+services:
+  jellyfin:
+    gpus: all
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility

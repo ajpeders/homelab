@@ -1,0 +1,39 @@
+services:
+  musicseerr:
+    container_name: musicseerr
+    security_opt:
+      - no-new-privileges:true
+    image: ghcr.io/habirabbu/musicseerr:v1.4.2
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    environment:
+      PUID: ${PUID:?set PUID in services/.env}
+      PGID: ${PGID:?set PGID in services/.env}
+      PORT: 8688
+      TZ: ${TZ:-UTC}
+      LIDARR_URL: ${MUSICSEERR_LIDARR_URL:-http://lidarr:8686}
+      LIDARR_API_KEY: ${MUSICSEERR_LIDARR_API_KEY}
+      QUALITY_PROFILE_ID: ${MUSICSEERR_QUALITY_PROFILE_ID:-1}
+      METADATA_PROFILE_ID: ${MUSICSEERR_METADATA_PROFILE_ID:-1}
+      ROOT_FOLDER_PATH: ${MUSICSEERR_ROOT_FOLDER_PATH:-/data/music}
+    volumes:
+      - ../../state/musicseerr/config:/app/config
+      - ../../state/musicseerr/cache:/app/cache
+      - ${MUSICSEERR_MUSIC_PATH:-${SHARE_DIR:?set SHARE_DIR in services/.env}/media/music}:/music:ro
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.musicseerr.rule=Host(`${MUSICSEERR_DOMAIN:-music.${DOMAIN}}`)
+      - traefik.http.routers.musicseerr.entrypoints=websecure
+      - traefik.http.routers.musicseerr.tls=true
+      - traefik.http.routers.musicseerr.tls.certresolver=letsencrypt
+      - traefik.http.routers.musicseerr.middlewares=local-only@file
+      - traefik.http.services.musicseerr.loadbalancer.server.port=8688
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

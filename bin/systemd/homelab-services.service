@@ -1,0 +1,31 @@
+# Homelab services compose stack — boot unit.
+# Install: sudo cp bin/systemd/homelab-services.service /etc/systemd/system/ \
+#          && sudo systemctl daemon-reload && sudo systemctl enable homelab-services
+[Unit]
+Description=Homelab services compose stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# No WorkingDirectory=/opt/homelab/...: compose keys bind-mount sources on the
+# LOGICAL path, so running it through the /opt/homelab symlink makes every
+# container look changed and recreates the whole stack. cd to the resolved path.
+
+# Self-healing reconcile. At boot, Docker's own `restart: unless-stopped` policy
+# starts containers independently of this unit; if the compose config drifted
+# since last boot (edited compose files), our `up` wants to Recreate the very
+# containers the daemon is racing to start → name conflict → the plain `up -d`
+# aborts and leaves a half-recreated stack with orphaned <hash>_name dupes.
+# So: try the fast reconcile first; on ANY failure, tear the stack down cleanly
+# (removes the conflicting/orphaned containers) and bring it back up.
+# --remove-orphans sweeps stragglers left by a prior partial run.
+ExecStart=/bin/sh -c 'cd "$$(readlink -f /opt/homelab/services)" && { docker compose up -d --remove-orphans || { echo "up failed — clean down+up"; docker compose down --remove-orphans; docker compose up -d --remove-orphans; }; }'
+ExecStop=/bin/sh -c 'cd "$$(readlink -f /opt/homelab/services)" && /usr/bin/docker compose stop'
+# Full down+up of ~55 containers (with image existence checks) can be slow.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

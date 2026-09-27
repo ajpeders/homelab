@@ -1,0 +1,54 @@
+services:
+  gluetun:
+    container_name: gluetun
+    security_opt:
+      - no-new-privileges:true
+    image: qmcgaw/gluetun:v3.41.1
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: mullvad
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${MULLVAD_WG_PRIVATE_KEY}
+      WIREGUARD_ADDRESSES: ${MULLVAD_WG_ADDRESSES}
+      SERVER_COUNTRIES: ${MULLVAD_SERVER_COUNTRIES:-USA}
+      SERVER_CITIES: ${MULLVAD_SERVER_CITIES:-Houston TX}
+      WIREGUARD_MTU: "1380"
+      FIREWALL_OUTBOUND_SUBNETS: 172.28.0.0/16,${LAN_SUBNET:?set LAN_SUBNET in services/.env},10.9.0.0/24
+      FIREWALL_INPUT_PORTS: "8080,9696"
+      DOT: "off"
+      DNS_ADDRESS: ${MULLVAD_DNS_ADDRESS:-10.64.0.1}
+      HEALTH_VPN_DURATION_INITIAL: 30s
+      HEALTH_VPN_DURATION_ADDITION: 30s
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ../../state/gluetun:/gluetun
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.qbittorrent.rule=Host(`${QBITTORRENT_DOMAIN:-qbit.${DOMAIN}}`)
+      - traefik.http.routers.qbittorrent.entrypoints=websecure
+      - traefik.http.routers.qbittorrent.tls=true
+      - traefik.http.routers.qbittorrent.tls.certresolver=letsencrypt
+      - traefik.http.routers.qbittorrent.middlewares=local-only@file
+      - traefik.http.routers.qbittorrent.service=qbittorrent
+      - traefik.http.services.qbittorrent.loadbalancer.server.port=8080
+      - traefik.http.routers.prowlarr.rule=Host(`${PROWLARR_DOMAIN:-prowlarr.${DOMAIN}}`)
+      - traefik.http.routers.prowlarr.entrypoints=websecure
+      - traefik.http.routers.prowlarr.tls=true
+      - traefik.http.routers.prowlarr.tls.certresolver=letsencrypt
+      - traefik.http.routers.prowlarr.middlewares=local-only@file
+      - traefik.http.routers.prowlarr.service=prowlarr
+      - traefik.http.services.prowlarr.loadbalancer.server.port=9696
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

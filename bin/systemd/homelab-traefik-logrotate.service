@@ -1,0 +1,11 @@
+[Unit]
+Description=Rotate Traefik's access log (mv + USR1 reopen + gzip)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/homelab/bin/traefik-logrotate
+# gzipping a multi-GB first rotation can take a while on this box.
+TimeoutStartSec=900

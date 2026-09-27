@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# palworld-idle — stop the Palworld server once nobody has been on for a while.
+# Run every ~10 min by homelab-palworld-idle.timer.
+#
+# Palworld's dedicated server holds several GB resident whether or not anyone is
+# playing, and it leaks steadily on top of that (hence the nightly in-image
+# restart). Idling it out reclaims that RAM on a box that also runs the media
+# and *arr stacks.
+#
+# Restart is deliberately MANUAL — there is no wake-on-demand for a UDP game
+# port, so an auto-start would just mean "always running" again. "palworld" is
+# in the dashboard's POWER_ALLOWLIST, so starting it is one tap on the
+# dashboard (or: cd games && docker compose up -d palworld).
+#
+# Because this stops a container whose restart policy is unless-stopped,
+# "palworld" must also be in bin/monitor's IGNORE_DOWN or the monitor will
+# report it as an unexpectedly-down service every 15 minutes.
+set -uo pipefail
+
+REPO="${HOMELAB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+STATE_DIR="$REPO/state/palworld"
+COUNTER="$STATE_DIR/idle-checks"
+LOG="$STATE_DIR/idle.log"
+CONTAINER="palworld"
+
+# Consecutive empty polls before stopping, against the 10-minute timer.
+# 72 × 10 min = ~12 hours (was 30 min until 2026-08-10). Long enough that a
+# session ending in the evening survives until the next day rather than
+# needing a restart every time someone logs off for a few hours; the memory it
+# holds is only worth reclaiming once nobody has played all day.
+IDLE_CHECKS="${PALWORLD_IDLE_CHECKS:-72}"
+# Don't judge a server that is still booting: first boot runs a SteamCMD update
+# and world-gen, and RCON refuses connections the whole time. An unreachable
+# RCON is NOT evidence of zero players.
+MIN_UPTIME_S="${PALWORLD_MIN_UPTIME_S:-600}"
+
+mkdir -p "$STATE_DIR"
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
+
+running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || echo false)"
+if [[ "$running" != "true" ]]; then
+  # Already down (idled out, or stopped by hand). Clear the counter so a fresh
+  # start gets a full grace period.
+  [[ -f "$COUNTER" ]] && rm -f "$COUNTER"
+  exit 0
+fi
+
+started_at="$(docker inspect -f '{{.State.StartedAt}}' "$CONTAINER" 2>/dev/null)"
+uptime_s=$(( $(date +%s) - $(date -d "$started_at" +%s 2>/dev/null || echo 0) ))
+if (( uptime_s < MIN_UPTIME_S )); then
+  exit 0
+fi
+
+# ShowPlayers prints a CSV header ("name,playeruid,steamid") and then one row
+# per connected player. Header-only means the server is empty.
+players_raw="$(docker exec "$CONTAINER" rcon-cli ShowPlayers 2>/dev/null)"
+rcon_rc=$?
+if (( rcon_rc != 0 )) || ! grep -q 'playeruid' <<<"$players_raw"; then
+  # RCON did not answer with something we recognise. Treat as unknown, not as
+  # empty — never stop a server we could not actually poll.
+  log "rcon unavailable (rc=$rcon_rc) — skipping this check"
+  exit 0
+fi
+
+players="$(grep -v 'playeruid' <<<"$players_raw" | grep -c '[^[:space:]]')"
+
+if (( players > 0 )); then
+  if [[ -f "$COUNTER" ]]; then
+    log "$players player(s) online — resetting idle counter"
+    rm -f "$COUNTER"
+  fi
+  exit 0
+fi
+
+n=$(( $(cat "$COUNTER" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$COUNTER"
+
+if (( n < IDLE_CHECKS )); then
+  # At a 12-hour threshold this fires 72 times per idle stretch. Log the first
+  # one and then hourly, so the log still shows the countdown without burying
+  # the lines that matter (resets, stops, RCON faults) in routine noise.
+  if (( n == 1 || n % 6 == 0 )); then
+    log "empty ($n/$IDLE_CHECKS) — waiting"
+  fi
+  exit 0
+fi
+
+# Render the grace period the way a human reads it — "~12 hours", not "720 min".
+_idle_mins=$(( n * 10 ))
+if (( _idle_mins >= 120 )); then
+  _idle_human="~$(( _idle_mins / 60 )) hours"
+else
+  _idle_human="~${_idle_mins} min"
+fi
+
+log "empty for $n consecutive checks ($_idle_human) — saving and stopping"
+docker exec "$CONTAINER" rcon-cli "Save" >/dev/null 2>&1 || log "warning: pre-stop save failed"
+if docker stop "$CONTAINER" >/dev/null 2>&1; then
+  rm -f "$COUNTER"
+  log "stopped"
+  "$REPO/bin/ntfy-alert" low zzz "palworld idled out" \
+    "No players for $_idle_human — server stopped. Start it from the dashboard or /palworld start in Discord." || true
+else
+  log "ERROR: docker stop failed"
+  exit 1
+fi

@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# deploy — config-driven CD agent for apps/ repos.
+#
+# For each bin/deploy.d/*.conf: fetch origin; if the tracked branch is ahead of
+# the local checkout AND (when REQUIRE_CI=1) Forgejo reports the tip commit's
+# CI as green, fast-forward + run the app's DEPLOY_CMD, then health-check and
+# roll back to the previous commit on failure. Every deploy (or rollback) pushes
+# a ntfy note; CI-red tips alert once per commit.
+#
+# Conf vars (bash, sourced):
+#   APP_DIR       repo path relative to the homelab root      (required)
+#   BRANCH        branch to track                             (default main)
+#   FORGEJO_REPO  owner/name on your Forgejo, used for the CI status
+#                 gate and the post-deploy commit status      (required if REQUIRE_CI=1)
+#   REQUIRE_CI    1 = only deploy commits whose combined Forgejo commit status
+#                 is "success"; 0 = deploy any new commit     (default 1)
+#   GUARD_CMD     optional; exit 0 = app is busy -> defer this tick
+#   DEPLOY_CMD    how to (re)deploy                           (required)
+#   HEALTH_CMD    exit 0 = healthy; retried HEALTH_TRIES times (default 6)
+#                 every HEALTH_DELAY seconds (default 10)
+#
+# Run by homelab-deploy@<user>.timer (docker + homelab groups, SSH key for
+# your Forgejo host). Safe to run by hand: ./bin/deploy [app-name]
+set -uo pipefail
+
+REPO="${HOMELAB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+cd "$REPO"
+
+# FORGEJO_DEPLOY_TOKEN (write:repository) for the status API.
+# shellcheck disable=SC1091
+[[ -f services/forgejo/.env ]] && { set -a; . services/forgejo/.env; set +a; }
+API="http://localhost:3000/api/v1"
+
+STATE_DIR="$REPO/state/deploy"
+mkdir -p "$STATE_DIR"
+# One-deep rotation so the decision log can't grow unbounded.
+[[ -f "$STATE_DIR/deploy.log" && $(stat -c%s "$STATE_DIR/deploy.log") -gt 5242880 ]] \
+  && mv "$STATE_DIR/deploy.log" "$STATE_DIR/deploy.log.1"
+
+# Every decision (deploy, skip, block, rollback) goes to the journal AND to a
+# persistent log, so "why didn't X deploy?" is answerable without journalctl.
+log() { echo "[$(date '+%F %T')] $*" | tee -a "$STATE_DIR/deploy.log"; }
+notify() { "$REPO/bin/ntfy-alert" "$1" "$2" "$3" "$4" || true; }
+
+# One run at a time. The 3-min timer and a hand-run ./bin/deploy used to
+# overlap freely: a manual deploy and the timer's
+# deploy recreated containers concurrently, the box bogged down, and a
+# health check failed on a commit that was fine — spurious rollback, red
+# commit status, and the tip then parked in failed-sha until a new push.
+# Exit rather than queue: the timer fires again in 3 min, and a queued run
+# would only pile up behind a slow deploy.
+exec 9>"$STATE_DIR/.lock"
+if ! flock -n 9; then
+  log "another deploy run holds the lock — skipping this tick"
+  exit 0
+fi
+
+# One account's token may not see another owner's repos — use the owner's own
+# FORGEJO_DEPLOY_TOKEN_<OWNER> (uppercased, non-alnum -> _) when set, else the
+# default FORGEJO_DEPLOY_TOKEN.
+tok_for() { # $1=owner/name
+  local owner="${1%%/*}" var
+  owner="${owner^^}"; var="FORGEJO_DEPLOY_TOKEN_${owner//[^A-Z0-9]/_}"
+  echo "${!var:-${FORGEJO_DEPLOY_TOKEN:-}}"
+}
+
+# -L on both: a transferred repo leaves the old owner/name answering 301. Without
+# it the redirect body fails to parse and ci_state() returns 'unknown', which
+# REQUIRE_CI logs as "waiting" *without alerting* — deploys stop dead and stay
+# quiet about it (bitten twice in practice). --post301/302/303 keep the
+# status POST a POST across the redirect instead of curl downgrading it to GET.
+# This is the belt; _check_repo_alignment below is the braces.
+ci_state() { # $1=repo $2=sha -> success|pending|failure|error|unknown
+  curl -fsSL --max-time 15 -H "Authorization: token $(tok_for "$1")" \
+    "$API/repos/$1/commits/$2/status" 2>/dev/null \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("state") or "unknown")' \
+    2>/dev/null || echo unknown
+}
+
+post_status() { # $1=repo $2=sha $3=state $4=description
+  curl -fsSL --post301 --post302 --post303 --max-time 15 -X POST \
+    -H "Authorization: token $(tok_for "$1")" -H "Content-Type: application/json" \
+    -d "{\"state\":\"$3\",\"context\":\"deploy/homelab\",\"description\":\"$4\"}" \
+    "$API/repos/$1/statuses/$2" >/dev/null 2>&1 || true
+}
+
+# owner/name out of either remote form:
+#   git@host:owner/name.git            ssh://git@host:2222/owner/name.git
+_repo_from_url() {
+  sed -E 's#\.git$##; s#^.*[:/]([^/]+/[^/]+)$#\1#' <<<"$1"
+}
+
+# Braces to ci_state's belt: -L makes a stale FORGEJO_REPO survive, this makes it
+# VISIBLE. git-over-SSH does not follow the 301 at all, so a conf that disagrees
+# with the checkout's origin is a real fault either way — and the whole problem
+# with this failure mode is that it is silent. Alerts once per distinct mismatch.
+_check_repo_alignment() { # $1=app name  $2=checkout dir  $3=conf FORGEJO_REPO
+  local name="$1" dir="$2" conf_repo="$3" url actual
+  [[ -n "$conf_repo" ]] || return 0
+  url="$(git -C "$dir" remote get-url origin 2>/dev/null)" || return 0
+  [[ -n "$url" ]] || return 0
+  actual="$(_repo_from_url "$url")"
+  # Forgejo treats owner/name case-insensitively; mixed-case repo names are fine.
+  local a b
+  a="$(tr '[:upper:]' '[:lower:]' <<<"$actual")"
+  b="$(tr '[:upper:]' '[:lower:]' <<<"$conf_repo")"
+  [[ "$a" == "$b" ]] && return 0
+  local key="$conf_repo -> $actual"
+  if [[ "$(cat "$STATE_DIR/$name.repo-mismatch-alerted" 2>/dev/null)" != "$key" ]]; then
+    notify high x "deploy misconfigured: $name" \
+      "conf FORGEJO_REPO=$conf_repo but origin is $actual — CI gate and status posts target the wrong repo"
+    echo "$key" > "$STATE_DIR/$name.repo-mismatch-alerted"
+  fi
+  log "$name: FORGEJO_REPO=$conf_repo disagrees with origin ($actual) — fix bin/deploy.d/$name.conf"
+}
+
+deploy_one() {
+  local conf="$1" name
+  name="$(basename "$conf" .conf)"
+
+  # conf vars, with defaults reset per app
+  local APP_DIR="" BRANCH="main" FORGEJO_REPO="" REQUIRE_CI=1
+  local GUARD_CMD="" DEPLOY_CMD="" HEALTH_CMD="" HEALTH_TRIES=6 HEALTH_DELAY=10
+  # shellcheck disable=SC1090
+  . "$conf"
+  if [[ -z "$APP_DIR" || -z "$DEPLOY_CMD" ]]; then
+    log "$name: conf missing APP_DIR/DEPLOY_CMD — skipping"; return
+  fi
+
+  local dir="$REPO/$APP_DIR"
+  [[ -d "$dir/.git" ]] || { log "$name: $APP_DIR is not a git repo — skipping"; return; }
+
+  # Deliberately BEFORE the dirty/branch guards below: those return early, and a
+  # permanently-dirty checkout would otherwise never get checked —
+  # which is exactly the app that last hit this. Warns, does not block.
+  _check_repo_alignment "$name" "$dir" "$FORGEJO_REPO"
+
+  # Never clobber work-in-progress.
+  if [[ -n "$(git -C "$dir" status --porcelain)" ]]; then
+    log "$name: working tree dirty — skipping"; return
+  fi
+  if [[ "$(git -C "$dir" branch --show-current)" != "$BRANCH" ]]; then
+    log "$name: not on $BRANCH — skipping"; return
+  fi
+
+  git -C "$dir" fetch --quiet origin "$BRANCH" || { log "$name: fetch failed"; return; }
+  local local_sha remote_sha
+  local_sha="$(git -C "$dir" rev-parse HEAD)"
+  remote_sha="$(git -C "$dir" rev-parse "origin/$BRANCH")"
+
+  # What's DEPLOYED is tracked in a stamp file — git sync alone can't tell:
+  # commits made+pushed from this live checkout leave local==remote while the
+  # running containers are stale. No stamp yet + already in sync = baseline
+  # (assume running state matches the checkout; don't storm-rebuild on rollout).
+  local deployed_sha; deployed_sha="$(cat "$STATE_DIR/$name.deployed" 2>/dev/null || true)"
+  if [[ -z "$deployed_sha" && "$local_sha" == "$remote_sha" ]]; then
+    echo "$remote_sha" > "$STATE_DIR/$name.deployed"
+    return
+  fi
+  [[ "$remote_sha" == "$deployed_sha" ]] && return
+
+  # A tip that already failed once is not retried (the 3-min timer would
+  # otherwise rebuild+rollback+alert in a loop); a new push clears it.
+  if [[ "$(cat "$STATE_DIR/$name.failed-sha" 2>/dev/null)" == "$remote_sha" ]]; then
+    log "$name: ${remote_sha:0:10} already failed a deploy — waiting for a new push"
+    return
+  fi
+
+  # Only touch the checkout when origin is STRICTLY ahead. Local-ahead means
+  # someone is developing here (they'll push when ready); diverged means a
+  # human needs to reconcile — alert once per remote tip, touch nothing.
+  if [[ "$local_sha" != "$remote_sha" ]] \
+     && ! git -C "$dir" merge-base --is-ancestor "$local_sha" "$remote_sha"; then
+    if git -C "$dir" merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+      log "$name: local is ahead of origin/$BRANCH — skipping"
+    else
+      if [[ "$(cat "$STATE_DIR/$name.diverged-alerted" 2>/dev/null)" != "$remote_sha" ]]; then
+        notify high x "deploy blocked: $name" "local checkout diverged from origin/$BRANCH — reconcile manually"
+        echo "$remote_sha" > "$STATE_DIR/$name.diverged-alerted"
+      fi
+      log "$name: diverged from origin/$BRANCH — skipping"
+    fi
+    return
+  fi
+
+  local short="${remote_sha:0:10}"
+  local subject; subject="$(git -C "$dir" log -1 --format=%s "$remote_sha")"
+
+  if [[ "$REQUIRE_CI" == 1 ]]; then
+    local state; state="$(ci_state "$FORGEJO_REPO" "$remote_sha")"
+    case "$state" in
+      success) ;;
+      pending|unknown)
+        log "$name: $short CI is '$state' — waiting"; return ;;
+      *)
+        # Alert once per red commit, then stay quiet until a new tip appears.
+        if [[ "$(cat "$STATE_DIR/$name.ci-alerted" 2>/dev/null)" != "$remote_sha" ]]; then
+          notify high x "deploy blocked: $name" "CI $state on $short — $subject"
+          echo "$remote_sha" > "$STATE_DIR/$name.ci-alerted"
+        fi
+        log "$name: $short CI is '$state' — blocked"; return ;;
+    esac
+  fi
+
+  if [[ -n "$GUARD_CMD" ]] && bash -c "$GUARD_CMD"; then
+    log "$name: busy (guard) — deferring $short"; return
+  fi
+
+  log "$name: deploying $local_sha -> $remote_sha ($subject)"
+  git -C "$dir" merge --ff-only --quiet "origin/$BRANCH" || {
+    notify high x "deploy failed: $name" "cannot fast-forward to $short (diverged history)"
+    return
+  }
+  if ! bash -c "$DEPLOY_CMD" >>"$STATE_DIR/$name.log" 2>&1; then
+    log "$name: DEPLOY_CMD failed — rolling back to ${local_sha:0:10}"
+    git -C "$dir" reset --hard --quiet "$local_sha"
+    bash -c "$DEPLOY_CMD" >>"$STATE_DIR/$name.log" 2>&1 || true
+    echo "$remote_sha" > "$STATE_DIR/$name.failed-sha"
+    post_status "$FORGEJO_REPO" "$remote_sha" failure "deploy command failed; rolled back"
+    notify urgent rotating_light "deploy FAILED: $name" "$short build/up failed — rolled back to ${local_sha:0:10}. See state/deploy/$name.log"
+    return
+  fi
+
+  local ok=0 i
+  for ((i=1; i<=HEALTH_TRIES; i++)); do
+    if [[ -z "$HEALTH_CMD" ]] || bash -c "$HEALTH_CMD" >/dev/null 2>&1; then ok=1; break; fi
+    sleep "$HEALTH_DELAY"
+  done
+
+  if [[ "$ok" == 1 ]]; then
+    echo "$remote_sha" > "$STATE_DIR/$name.deployed"
+    rm -f "$STATE_DIR/$name.failed-sha"
+    post_status "$FORGEJO_REPO" "$remote_sha" success "deployed to homelab"
+    # high: the user wants deploys to pop visibly on iOS like the failure
+    # alerts do (low = silent, default proved unreliable to banner).
+    notify high rocket "deployed: $name" "$short — $subject"
+    log "$name: $short deployed + healthy"
+  else
+    log "$name: health check failed — rolling back to ${local_sha:0:10}"
+    git -C "$dir" reset --hard --quiet "$local_sha"
+    bash -c "$DEPLOY_CMD" >>"$STATE_DIR/$name.log" 2>&1 || true
+    echo "$remote_sha" > "$STATE_DIR/$name.failed-sha"
+    post_status "$FORGEJO_REPO" "$remote_sha" failure "unhealthy after deploy; rolled back"
+    notify urgent rotating_light "deploy FAILED: $name" "$short unhealthy after deploy — rolled back to ${local_sha:0:10}"
+  fi
+}
+
+shopt -s nullglob
+confs=("$REPO"/bin/deploy.d/*.conf)
+[[ $# -ge 1 ]] && confs=("$REPO/bin/deploy.d/$1.conf")
+for conf in "${confs[@]}"; do
+  [[ -f "$conf" ]] || { log "no such app conf: $conf"; exit 1; }
+  deploy_one "$conf"
+done

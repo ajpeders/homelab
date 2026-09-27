@@ -1,0 +1,78 @@
+name: services
+
+include:
+  - path: ./traefik/docker-compose.yml
+    env_file: ./traefik/.env
+  # RETIRED 2026-09-19 — SearXNG removed from active stack. The Compose file
+  # is retained behind `profiles: ["deprecated"]`; restore with
+  #   docker compose --profile deprecated up -d
+  # See services/searxng/docker-compose.yml header + audit.md 2026-09-19.
+  # - path: ./searxng/docker-compose.yml
+  #   env_file: ./searxng/.env
+  - path: ./adguard/docker-compose.yml
+    env_file: ./adguard/.env
+  - path: ./unbound/docker-compose.yml
+  - path: ./wireguard/docker-compose.yml
+    env_file: ./wireguard/.env
+  - path: ./samba/docker-compose.yml
+    env_file: ./samba/.env
+  - path: ./paperless/docker-compose.yml
+    env_file: ./paperless/.env
+  - path: ./vaultwarden/docker-compose.yml
+    env_file: ./vaultwarden/.env
+  - path: ./linkding/docker-compose.yml
+    env_file: ./linkding/.env
+  - path: ./changedetection/docker-compose.yml
+    env_file: ./changedetection/.env
+  - path: ./forgejo/docker-compose.yml
+    env_file: ./forgejo/.env
+  - path: ./mealie/docker-compose.yml
+    env_file: ./mealie/.env
+  - path: ./ntfy/docker-compose.yml
+    env_file: ./ntfy/.env
+  - path: ./portainer/docker-compose.yml
+    env_file: ./portainer/.env
+  - path: ./matrix/docker-compose.yml
+    env_file: ./matrix/.env
+  - path: ./plex/docker-compose.yml
+    env_file: ./plex/.env
+  - path: ./jellyfin/docker-compose.yml
+    env_file: ./jellyfin/.env
+  - path: ./gluetun/docker-compose.yml
+    env_file: ./gluetun/.env
+  - path: ./qbittorrent/docker-compose.yml
+    env_file: ./qbittorrent/.env
+  - path: ./sabnzbd/docker-compose.yml
+    env_file: ./sabnzbd/.env
+  - path: ./prowlarr/docker-compose.yml
+    env_file: ./prowlarr/.env
+  - path: ./sonarr/docker-compose.yml
+    env_file: ./sonarr/.env
+  - path: ./radarr/docker-compose.yml
+    env_file: ./radarr/.env
+  - path: ./lidarr/docker-compose.yml
+    env_file: ./lidarr/.env
+  - path: ./bazarr/docker-compose.yml
+    env_file: ./bazarr/.env
+  - path: ./musicseerr/docker-compose.yml
+    env_file: ./musicseerr/.env
+  - path: ./overseerr/docker-compose.yml
+    env_file: ./overseerr/.env
+  - path: ./flaresolverr/docker-compose.yml
+    env_file: ./flaresolverr/.env
+  # Least-privilege Docker API on 127.0.0.1:2375 (container read +
+  # lifecycle only) for host-side automation that shouldn't hold docker.sock.
+  - path: ./docker-socket-proxy/docker-compose.yml
+  - path: ./vm-lab/docker-compose.yml
+    env_file: ./vm-lab/.env
+  # Was running under a standalone `open-webui` compose project until
+  # 2026-08-14 (someone ran compose from inside services/open-webui/), so the
+  # services stack never managed it and it survived reboots only on its restart
+  # policy. Now in the stack proper.
+  - path: ./open-webui/docker-compose.yml
+    env_file: ./open-webui/.env
+  - path: ./offline/docker-compose.yml
+
+networks:
+  web:
+    name: web

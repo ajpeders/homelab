@@ -1,0 +1,42 @@
+services:
+  ntfy:
+    container_name: ntfy
+    security_opt:
+      - no-new-privileges:true
+    image: binwiederhier/ntfy:v2.24.0
+    restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
+    command: serve
+    # Localhost-only publish port for host-side alerters (bin/ntfy-alert,
+    # bin/monitor, bin/backup). Bound to 127.0.0.1 so it's not exposed on the
+    # LAN — public access still goes through Traefik. This keeps alerting
+    # independent of Traefik/DNS/TLS being up.
+    ports:
+      - "127.0.0.1:8092:80"
+    environment:
+      TZ: ${TZ:-UTC}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ../../state/ntfy/cache:/var/cache/ntfy
+      - ../../state/ntfy/etc:/etc/ntfy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.ntfy.rule=Host(`${NTFY_DOMAIN:-ntfy.${DOMAIN}}`)
+      - traefik.http.routers.ntfy.entrypoints=websecure
+      - traefik.http.routers.ntfy.tls=true
+      - traefik.http.routers.ntfy.tls.certresolver=letsencrypt
+      - traefik.http.services.ntfy.loadbalancer.server.port=80
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

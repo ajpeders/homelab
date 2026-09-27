@@ -1,0 +1,16 @@
+# Template: the instance name is the account that runs deploys — it needs the
+# docker + homelab groups and the SSH key for the Forgejo host.
+#   sudo cp bin/systemd/homelab-deploy@.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now homelab-deploy@<user>.timer
+[Unit]
+Description=Homelab CD agent (as %i) — deploy green main of configured app repos
+After=docker.service network-online.target
+Wants=docker.service
+
+[Service]
+Type=oneshot
+# Not root: repo files stay group-owned instead of root-owned.
+User=%i
+ExecStart=/opt/homelab/bin/deploy
+# Builds can take a while (docker build + health retries).
+TimeoutStartSec=900

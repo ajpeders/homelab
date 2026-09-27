@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# Bootstrap a fresh server to run the homelab stacks.
+# Idempotent: safe to re-run.
+#
+# Does:
+#   - install docker/compose/rsync/git/curl (Arch only; other distros = check + hint)
+#   - create the 'web' docker network
+#   - prepare state/traefik/acme.json
+#   - copy every .env.example → .env where one is missing
+#   - optionally install the backup systemd timer
+#
+# Does NOT bring stacks up — you fill in .env files first, then `docker compose up -d`.
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_DIR"
+
+c_step()  { printf '\n\033[1;36m▸ %s\033[0m\n' "$*"; }
+c_ok()    { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
+c_info()  { printf '  %s\n' "$*"; }
+c_warn()  { printf '  \033[1;33m!\033[0m %s\n' "$*" >&2; }
+c_err()   { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; }
+
+if [ "$EUID" -eq 0 ]; then
+  c_err "Run as your normal user, not root. (sudo will be invoked where needed.)"
+  exit 1
+fi
+
+# ---------- prerequisites ----------
+c_step "Checking prerequisites"
+
+DISTRO=""
+if [ -r /etc/os-release ]; then
+  DISTRO=$(. /etc/os-release && echo "${ID:-}")
+fi
+
+need_pkg() { ! command -v "$1" >/dev/null 2>&1; }
+need_compose() { ! docker compose version >/dev/null 2>&1; }
+
+MISSING=()
+need_pkg docker  && MISSING+=(docker)
+need_pkg rsync   && MISSING+=(rsync)
+need_pkg git     && MISSING+=(git)
+need_pkg curl    && MISSING+=(curl)
+command -v docker >/dev/null 2>&1 && need_compose && MISSING+=(docker-compose)
+
+if [ ${#MISSING[@]} -gt 0 ]; then
+  if [ "$DISTRO" = "arch" ]; then
+    c_info "Installing on Arch: ${MISSING[*]}"
+    # map our generic names to Arch package names
+    declare -A ARCH_PKG=(
+      [docker]=docker
+      [docker-compose]=docker-compose
+      [rsync]=rsync
+      [git]=git
+      [curl]=curl
+    )
+    ARCH_PKGS=()
+    for m in "${MISSING[@]}"; do ARCH_PKGS+=("${ARCH_PKG[$m]}"); done
+    sudo pacman -S --needed --noconfirm "${ARCH_PKGS[@]}"
+    if [[ " ${MISSING[*]} " == *" docker "* ]]; then
+      sudo systemctl enable --now docker.service
+      if ! id -nG "$USER" | grep -qw docker; then
+        sudo usermod -aG docker "$USER"
+        c_warn "Added $USER to 'docker' group. Log out + back in (or 'newgrp docker') before re-running this script."
+        exit 0
+      fi
+    fi
+  else
+    c_err "Missing: ${MISSING[*]}"
+    cat >&2 <<EOF
+This script only auto-installs on Arch. On your distro install manually, e.g.:
+  Debian/Ubuntu: sudo apt install docker.io docker-compose-plugin rsync git curl
+  Fedora:        sudo dnf install docker docker-compose-plugin rsync git curl
+Then:
+  sudo systemctl enable --now docker
+  sudo usermod -aG docker \$USER   # log out + back in
+EOF
+    exit 1
+  fi
+else
+  c_ok "all required commands present"
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  c_err "docker daemon not reachable. Is it running, and are you in the 'docker' group?"
+  c_info "Try: sudo systemctl start docker  &&  newgrp docker"
+  exit 1
+fi
+c_ok "docker daemon reachable"
+
+# ---------- gVisor (CI job sandbox) ----------
+# forgejo-runner spawns CI job containers with --runtime=runsc (see
+# services/forgejo/runner-config/config.yml). Without runsc registered in
+# /etc/docker/daemon.json, jobs fail to start (safe, but CI is dead).
+c_step "Checking gVisor runtime for CI jobs"
+if docker info 2>/dev/null | grep -qE 'Runtimes:.*\brunsc\b'; then
+  c_ok "runsc runtime registered"
+else
+  c_warn "gVisor (runsc) not registered as a docker runtime — CI jobs will not start."
+  c_info "  Install runsc (https://gvisor.dev/docs/user_guide/install/), then add to /etc/docker/daemon.json:"
+  c_info '    "runtimes": { "runsc": { "path": "/usr/local/bin/runsc" } }'
+  c_info "  and: sudo systemctl restart docker"
+fi
+
+# ---------- wireguard kernel module ----------
+# wg-easy runs without CAP_SYS_MODULE; the host must load the module at boot.
+c_step "Ensuring wireguard kernel module loads at boot"
+if [ -d /etc/modules-load.d ]; then
+  if [ ! -f /etc/modules-load.d/wireguard.conf ]; then
+    sudo cp bin/modules-load.d/wireguard.conf /etc/modules-load.d/wireguard.conf
+    c_ok "installed /etc/modules-load.d/wireguard.conf"
+  else
+    c_ok "already present"
+  fi
+  if ! lsmod | grep -q '^wireguard'; then
+    sudo modprobe wireguard && c_ok "module loaded now" || c_warn "modprobe wireguard failed — VPN will not start"
+  else
+    c_ok "module already loaded"
+  fi
+else
+  c_warn "no /etc/modules-load.d — load the wireguard module however your init does it"
+fi
+
+# ---------- /opt/homelab → repo ----------
+# The checked-in systemd units and fail2ban jail can't read env vars, so they
+# name this fixed path; the symlink points it at wherever the repo lives.
+# (Never run `docker compose` *through* it — see homelab-services.service.)
+c_step "Linking /opt/homelab → $REPO_DIR"
+if [ "$(readlink -f /opt/homelab 2>/dev/null)" = "$(readlink -f "$REPO_DIR")" ]; then
+  c_ok "/opt/homelab already points here"
+elif [ -e /opt/homelab ] || [ -L /opt/homelab ]; then
+  c_warn "/opt/homelab exists and points elsewhere ($(readlink -f /opt/homelab)) — fix it by hand"
+else
+  sudo ln -s "$REPO_DIR" /opt/homelab && c_ok "created /opt/homelab"
+fi
+
+# ---------- docker network ----------
+c_step "Ensuring 'web' docker network exists"
+if docker network inspect web >/dev/null 2>&1; then
+  c_ok "already exists"
+else
+  docker network create web >/dev/null
+  c_ok "created"
+fi
+
+# ---------- traefik ACME storage ----------
+c_step "Preparing traefik ACME storage"
+mkdir -p state/traefik
+[ -f state/traefik/acme.json ] || touch state/traefik/acme.json
+chmod 600 state/traefik/acme.json
+c_ok "state/traefik/acme.json (mode 600)"
+
+# ---------- config scaffolding ----------
+# Covers both .env.example and service config templates that ship as *.example
+# but are gitignored once filled in (e.g. matrix coturn.conf/dendrite.yaml/
+# livekit.yaml, samba config.yml, searxng settings.yml).
+c_step "Scaffolding config files from *.example (won't overwrite)"
+CREATED=()
+SKIPPED=0
+while IFS= read -r example; do
+  envfile="${example%.example}"
+  if [ -e "$envfile" ]; then
+    SKIPPED=$((SKIPPED + 1))
+  else
+    cp "$example" "$envfile"
+    CREATED+=("$envfile")
+  fi
+done < <(find services apps games -maxdepth 4 -name '*.example' -type f 2>/dev/null | sort)
+
+c_ok "created ${#CREATED[@]}, left ${SKIPPED} existing untouched"
+for f in "${CREATED[@]}"; do c_info "+ $f"; done
+
+# ---------- services/.env COMPOSE_FILE ----------
+c_step "Writing services/.env"
+SERVICES_ENV="$REPO_DIR/services/.env"
+printf '%s
+' \
+  "# Generated by bin/install." \
+  "COMPOSE_FILE=docker-compose.yml" > "$SERVICES_ENV"
+c_ok "wrote $SERVICES_ENV"
+
+# Every hostname derives from DOMAIN; the placeholder routes nothing real.
+for _envf in "$SERVICES_ENV" "$REPO_DIR/games/.env"; do
+  _dom=$(sed -n 's/^DOMAIN=//p' "$_envf" 2>/dev/null | tail -1)
+  if [ -z "$_dom" ] || [ "$_dom" = example.com ]; then
+    c_warn "set DOMAIN in ${_envf#$REPO_DIR/} (currently: ${_dom:-unset})"
+  fi
+done
+
+# ---------- backup timer (prompt) ----------
+c_step "Backup systemd timer"
+printf '  Install ~/.config/systemd/user/homelab-backup.{service,timer}? [y/N] '
+read -r ans
+if [[ "$ans" =~ ^[Yy]$ ]]; then
+  UNIT_DIR="$HOME/.config/systemd/user"
+  mkdir -p "$UNIT_DIR"
+
+  cat >"$UNIT_DIR/homelab-backup.service" <<EOF
+[Unit]
+Description=Homelab nightly backup (bin/backup)
+
+[Service]
+Type=oneshot
+ExecStart=$REPO_DIR/bin/backup
+StandardOutput=append:$REPO_DIR/state/backup.log
+StandardError=append:$REPO_DIR/state/backup.log
+EOF
+
+  cat >"$UNIT_DIR/homelab-backup.timer" <<EOF
+[Unit]
+Description=Run homelab backup nightly at 2am
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl --user daemon-reload
+  systemctl --user enable --now homelab-backup.timer >/dev/null
+  c_ok "homelab-backup.timer enabled"
+
+  # lingering lets the timer fire without an active login session
+  if ! loginctl show-user "$USER" 2>/dev/null | grep -q '^Linger=yes'; then
+    c_info "enabling user lingering so the timer fires when you're logged out…"
+    sudo loginctl enable-linger "$USER"
+  fi
+
+  cat <<EOF
+
+  Backup needs passwordless sudo for rsync. Add this with 'sudo visudo -f /etc/sudoers.d/rsync-backup':
+    $USER ALL=(ALL) NOPASSWD: /usr/bin/rsync
+
+  Set BACKUP_* in services/.env (remote host/user/dir, SSH key, known_hosts, USB mount).
+EOF
+else
+  c_info "skipped"
+fi
+
+# ---------- done ----------
+c_step "Bootstrap complete"
+cat <<EOF
+
+Next steps:
+  1. Fill in secrets in the files just created (see list above).
+     - .env files — cross-cutting: services/traefik/.env (CF_DNS_API_TOKEN, LETSENCRYPT_EMAIL).
+     - Service config templates also need editing (REPLACE_* placeholders / host IPs):
+         services/matrix/{coturn.conf,dendrite.yaml,livekit.yaml}
+           (coturn.conf relay/external IPs must be this host's LAN IP;
+            turn_shared_secret must match coturn static-auth-secret)
+         services/samba/config.yml, services/searxng/settings.yml
+  2. (Optional) Seed state + .env from another running homelab host:
+       ./bin/copy-from user@old-host
+  3. Bring up the stacks:
+       (cd services && docker compose up -d)
+       (cd games && docker compose up -d)
+  4. Check what's running:
+       docker ps --format 'table {{.Names}}\t{{.Status}}'
+
+EOF

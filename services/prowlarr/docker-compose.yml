@@ -1,0 +1,25 @@
+services:
+  prowlarr:
+    container_name: prowlarr
+    security_opt:
+      - no-new-privileges:true
+    image: lscr.io/linuxserver/prowlarr:2.4.0
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    network_mode: "service:gluetun"
+    environment:
+      PUID: ${PUID:?set PUID in services/.env}
+      PGID: ${PGID:?set PGID in services/.env}
+      TZ: ${TZ:-UTC}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9696/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ../../state/prowlarr:/config

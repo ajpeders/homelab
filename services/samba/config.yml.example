@@ -1,0 +1,29 @@
+# Samba configuration for crazymax/samba
+# Edit this file directly — env var substitution is NOT supported here.
+# Docs: https://github.com/crazy-max/docker-samba
+
+auth:
+  # Match the host account that owns the shared files (`id <user>`).
+  - user: homelab
+    group: homelab
+    uid: 1000
+    gid: 1000
+    password: changeme
+
+global:
+  - "server string = homelab"
+  - "netbios name = homelab"
+  - "security = user"
+  - "map to guest = never"
+  - "min protocol = SMB2"
+  - "host msdfs = no"
+
+share:
+  - name: share
+    path: /samba/files
+    browsable: yes
+    readonly: no
+    guestok: no
+    validusers: homelab
+    writelist: homelab
+    veto: no

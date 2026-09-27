@@ -1,0 +1,31 @@
+services:
+  vaultwarden:
+    container_name: vaultwarden
+    security_opt:
+      - no-new-privileges:true
+    image: vaultwarden/server:1.37.1
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    environment:
+      DOMAIN: https://${VAULTWARDEN_DOMAIN:-vault.${DOMAIN}}
+      SIGNUPS_ALLOWED: ${VAULTWARDEN_SIGNUPS_ALLOWED:-false}
+      ADMIN_TOKEN: ${VAULTWARDEN_ADMIN_TOKEN}
+    volumes:
+      - ../../state/vaultwarden:/data
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.vaultwarden.rule=Host(`${VAULTWARDEN_DOMAIN:-vault.${DOMAIN}}`)
+      - traefik.http.routers.vaultwarden.entrypoints=websecure
+      - traefik.http.routers.vaultwarden.tls=true
+      - traefik.http.routers.vaultwarden.tls.certresolver=letsencrypt
+      - traefik.http.routers.vaultwarden.middlewares=local-only@file
+      - traefik.http.services.vaultwarden.loadbalancer.server.port=80
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+    name: web

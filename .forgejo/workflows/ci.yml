@@ -1,0 +1,58 @@
+# Homelab repo CI: shellcheck on bin/ + compose config validation on both
+# stacks. Runs in the sandboxed runner (node:20 container, gVisor, no docker
+# daemon) — compose validation uses the standalone compose binary, which
+# parses fine daemonless. Pinned to the host's compose version (5.5.0):
+# older majors reject the stack's networks.web pattern that 5.x accepts.
+name: ci
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq shellcheck >/dev/null
+          curl -fsSL -o /usr/local/bin/docker-compose \
+            https://github.com/docker/compose/releases/download/v5.5.0/docker-compose-linux-x86_64
+          chmod +x /usr/local/bin/docker-compose
+          shellcheck --version | head -2
+          docker-compose version
+
+      - name: shellcheck bin/
+        run: |
+          set -eu
+          files=$(for f in bin/*; do
+            [ -f "$f" ] && head -1 "$f" | grep -qE '^#!.*\b(ba)?sh\b' && echo "$f" || true
+          done)
+          echo "checking:" $files
+          # -S error for now (all 19 scripts pass); tightening to the default
+          # warning level is a separate cleanup — see ROADMAP.
+          shellcheck -S error $files
+
+      - name: compose config (services + games)
+        run: |
+          set -eu
+          # Scaffold .env from every .env.example, like bin/install does.
+          find . -name '.env.example' -exec sh -c 'cp "$1" "${1%.example}"' _ {} \;
+          # apps/ is not part of this repo (separate app repos, gitignored
+          # deploy checkouts), so strip include entries that reach into it:
+          # top-level ../apps/ paths, and local shims whose own file includes
+          # from apps/ (detected, not hardcoded).
+          shims=$(grep -l 'path:.*\.\./apps/' services/*/docker-compose.yml \
+            | sed 's|services/\(.*\)/docker-compose.yml|\1|' | paste -sd'|')
+          echo "app shims filtered: $shims"
+          awk -v re="- path: \\\\./($shims)/docker-compose" \
+            '$0 ~ /- path: \.\.\/apps\// || $0 ~ re {skip=1; next}
+             skip==1 && /env_file:/ {skip=0; next}
+             {skip=0; print}' services/docker-compose.yml > /tmp/dc.yml
+          mv /tmp/dc.yml services/docker-compose.yml
+          (cd services && docker-compose config -q)
+          (cd games && docker-compose config -q)
+          echo "compose config OK on both stacks"

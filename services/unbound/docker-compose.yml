@@ -1,0 +1,19 @@
+services:
+  unbound:
+    container_name: unbound
+    security_opt:
+      - no-new-privileges:true
+    image: mvance/unbound:1.22.0
+    restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
+    volumes:
+      - ./unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
+    networks:
+      web:
+        ipv4_address: 172.28.0.100
+
+networks:
+  web:
+    external: true
+    name: web

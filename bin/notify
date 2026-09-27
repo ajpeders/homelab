@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# notify — send yourself a push notification from any on-network device.
+#
+#   notify "Build finished"
+#   notify "Disk filling up" "only 3% left on /mnt/storage"
+#   NOTIFY_PRIORITY=high NOTIFY_TAGS=fire notify "Something is on fire"
+#
+# Publishes to the `homelab-notify` topic, which is deliberately NOT the topic
+# `bin/monitor` and `bin/backup` use: those carry things you must act on, and
+# mixing ad-hoc pings into them is how a real alert gets scrolled past. See
+# bin/ntfy-alert for that path.
+#
+# Transport is Traefik (https://ntfy.<DOMAIN>) rather than the
+# localhost-only 127.0.0.1:8092 port, because the whole point is to be reachable
+# from other machines. That works from the LAN and over Tailscale — both
+# 192.168.1.0/16 and 100.64.0.0/10 are in traefik's `local-only` allowlist.
+#
+# Token resolution, in order:
+#   1. $NTFY_TOKEN                      — set this on laptops/Macs
+#   2. services/ntfy/.env               — used when running on the homelab
+# The token is write-only to this one topic, so a copy sitting in a dotfile on a
+# laptop cannot publish to the alert channels.
+#
+# Installing on a Mac: copy this file anywhere on PATH, then add to ~/.zshrc:
+#   export NTFY_TOKEN=tk_...            (get it: grep NTFY_NOTIFY_TOKEN services/ntfy/.env)
+set -uo pipefail
+
+# Off the homelab there is no services/.env: set NTFY_URL (or DOMAIN) there.
+DOMAIN="${DOMAIN:-$(sed -n 's/^DOMAIN=//p' "$(dirname "${BASH_SOURCE[0]}")/../services/.env" 2>/dev/null | tail -1)}"
+if [[ -z "${NTFY_URL:-}" && -z "$DOMAIN" ]]; then
+  echo "notify: set NTFY_URL (e.g. https://ntfy.example.com) or DOMAIN" >&2; exit 2
+fi
+URL="${NTFY_URL:-https://ntfy.$DOMAIN}"
+TOPIC="${NTFY_TOPIC:-homelab-notify}"
+TOKEN="${NTFY_TOKEN:-}"
+
+if [[ -z "$TOKEN" ]]; then
+  conf="$(dirname "${BASH_SOURCE[0]}")/../services/ntfy/.env"
+  if [[ -r "$conf" ]]; then
+    TOKEN="$(sed -n 's/^NTFY_NOTIFY_TOKEN=//p' "$conf" | head -1)"
+  fi
+fi
+
+if [[ -z "$TOKEN" ]]; then
+  echo "notify: no token — set NTFY_TOKEN (see the header of this script)" >&2
+  exit 1
+fi
+
+if [[ $# -eq 0 ]]; then
+  echo "usage: notify <title> [message]" >&2
+  exit 2
+fi
+
+title="$1"
+body="${2:-}"
+
+if curl -fsS --max-time 10 \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Title: $title" \
+     -H "Priority: ${NOTIFY_PRIORITY:-default}" \
+     -H "Tags: ${NOTIFY_TAGS:-bell}" \
+     -d "$body" "$URL/$TOPIC" >/dev/null; then
+  echo "sent: $title"
+else
+  echo "notify: failed to publish to $URL/$TOPIC" >&2
+  exit 1
+fi
